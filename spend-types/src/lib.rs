@@ -2,11 +2,11 @@ use serde::{Deserialize, Serialize};
 
 pub const TARGET_SIZE: usize = 1_000_000;
 pub const CONFIRMATION_DEPTH: u64 = 10;
-pub const NUM_BUCKETS: usize = 131_072; // 2^17
-pub const BUCKET_CAPACITY: usize = 16;
+pub const NUM_BUCKETS: usize = 16_384; // 2^14
+pub const BUCKET_CAPACITY: usize = 112;
 pub const ENTRY_BYTES: usize = 32;
-pub const BUCKET_BYTES: usize = BUCKET_CAPACITY * ENTRY_BYTES; // 512
-pub const DB_BYTES: usize = NUM_BUCKETS * BUCKET_BYTES; // ~64 MB
+pub const BUCKET_BYTES: usize = BUCKET_CAPACITY * ENTRY_BYTES; // 3,584 (= 28,672 bits, SimplePIR minimum row)
+pub const DB_BYTES: usize = NUM_BUCKETS * BUCKET_BYTES; // ~56 MB
 
 /// Map a nullifier to its bucket index.
 /// Nullifiers are cryptographically random, so the first 4 bytes give uniform distribution.
@@ -114,7 +114,7 @@ mod tests {
             let bucket = hash_to_bucket(&nf);
             *counts.entry(bucket).or_default() += 1;
         }
-        // With 10k samples over 131072 buckets, most buckets get 0 or 1 hit.
+        // With 10k samples over 16,384 buckets, expect ~0.6 per bucket on average.
         // No bucket should get a wildly disproportionate number.
         let max_count = counts.values().max().copied().unwrap_or(0);
         assert!(max_count < 10, "max bucket count {max_count} is too high");

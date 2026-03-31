@@ -3,6 +3,10 @@ name = "spend-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+ypir = ["dep:ypir", "dep:spiral-rs"]
+
 [dependencies]
 spend-types = { path = "../spend-types" }
 hashtable-pir = { path = "../hashtable-pir" }
@@ -16,6 +20,8 @@ arc-swap = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
+ypir = { git = "https://github.com/valargroup/ypir.git", branch = "valar/artifact", default-features = false, features = ["server"], optional = true }
+spiral-rs = { git = "https://github.com/valargroup/spiral-rs.git", branch = "valar/avoid-avx512", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
