@@ -73,9 +73,18 @@ impl PirEngine for YpirPirEngine {
         state: &YpirServerState,
         query_bytes: &[u8],
     ) -> Result<Vec<u8>, YpirError> {
-        let response = state
-            .server
-            .perform_full_online_computation_simplepir(&state.offline_vals, query_bytes);
-        Ok(response)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state
+                .server
+                .perform_full_online_computation_simplepir(&state.offline_vals, query_bytes)
+        }))
+        .map_err(|e| {
+            let msg = e
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| e.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            YpirError::Query(msg.to_string())
+        })
     }
 }

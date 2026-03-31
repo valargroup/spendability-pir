@@ -2,7 +2,7 @@ use crate::proto::compact_tx_streamer_client::CompactTxStreamerClient;
 use crate::proto::{BlockId, BlockRange, ChainSpec, CompactBlock};
 use thiserror::Error;
 use tokio_stream::StreamExt;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 #[derive(Error, Debug)]
 pub enum ClientError {
@@ -23,9 +23,20 @@ pub struct LwdClient {
 
 impl LwdClient {
     /// Connect to the first reachable endpoint from the given list.
+    /// Automatically enables TLS for `https://` endpoints.
     pub async fn connect(endpoints: &[String]) -> Result<Self> {
         for endpoint in endpoints {
-            match CompactTxStreamerClient::connect(endpoint.clone()).await {
+            let result = if endpoint.starts_with("https://") {
+                let tls = ClientTlsConfig::new().with_native_roots();
+                let ep = Endpoint::from_shared(endpoint.clone())
+                    .map_err(|e| tonic::transport::Error::from(e))?
+                    .tls_config(tls)?;
+                CompactTxStreamerClient::connect(ep).await
+            } else {
+                CompactTxStreamerClient::connect(endpoint.clone()).await
+            };
+
+            match result {
                 Ok(client) => {
                     tracing::info!(endpoint, "connected to lightwalletd");
                     return Ok(Self { inner: client });
