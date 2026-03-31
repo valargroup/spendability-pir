@@ -1,0 +1,162 @@
+use crate::{BlockRecord, Bucket, HashTableDb, HashTableError, Result};
+use spend_types::{BUCKET_BYTES, BUCKET_CAPACITY, NUM_BUCKETS};
+use std::collections::{BTreeMap, HashMap};
+use xxhash_rust::xxh64::xxh64;
+
+const SNAPSHOT_MAGIC: u64 = 0x5350_454E_4450_4952; // "SPENDPIR"
+const SNAPSHOT_VERSION: u64 = 1;
+
+impl HashTableDb {
+    pub fn to_snapshot(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Header
+        let magic_version = SNAPSHOT_MAGIC | (SNAPSHOT_VERSION << 56);
+        buf.extend_from_slice(&magic_version.to_le_bytes());
+        buf.extend_from_slice(&self.latest_height().unwrap_or(0).to_le_bytes());
+
+        let latest_hash = self.latest_block_hash().unwrap_or([0u8; 32]);
+        let latest_hash_height = self.latest_height().unwrap_or(0);
+        buf.extend_from_slice(&latest_hash_height.to_le_bytes());
+        buf.extend_from_slice(&latest_hash);
+
+        buf.extend_from_slice(&(self.num_entries as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.block_index.len() as u64).to_le_bytes());
+
+        // Block index (ordered by height via BTreeMap iteration)
+        for (height, record) in &self.block_index {
+            buf.extend_from_slice(&height.to_le_bytes());
+            buf.extend_from_slice(&record.block_hash);
+            buf.extend_from_slice(&(record.slots.len() as u32).to_le_bytes());
+            for (bucket_idx, slot_idx) in &record.slots {
+                buf.extend_from_slice(&bucket_idx.to_le_bytes());
+                buf.push(*slot_idx);
+                buf.push(0); // padding
+            }
+        }
+
+        // Bucket data
+        for bucket in &self.buckets {
+            for entry in &bucket.entries {
+                buf.extend_from_slice(entry);
+            }
+        }
+
+        // Checksum
+        let checksum = xxh64(&buf, 0);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+
+        buf
+    }
+
+    pub fn from_snapshot(data: &[u8]) -> Result<Self> {
+        let min_size = 8 + 8 + 8 + 32 + 8 + 8 + (NUM_BUCKETS * BUCKET_BYTES) + 8;
+        if data.len() < min_size {
+            return Err(HashTableError::Snapshot("data too short".into()));
+        }
+
+        // Verify checksum
+        let payload = &data[..data.len() - 8];
+        let stored_checksum = u64::from_le_bytes(data[data.len() - 8..].try_into().unwrap());
+        let computed_checksum = xxh64(payload, 0);
+        if stored_checksum != computed_checksum {
+            return Err(HashTableError::Snapshot("checksum mismatch".into()));
+        }
+
+        let mut pos = 0;
+
+        let read_u64 = |pos: &mut usize| -> Result<u64> {
+            if *pos + 8 > payload.len() {
+                return Err(HashTableError::Snapshot("unexpected EOF".into()));
+            }
+            let val = u64::from_le_bytes(payload[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            Ok(val)
+        };
+
+        let read_u32 = |pos: &mut usize| -> Result<u32> {
+            if *pos + 4 > payload.len() {
+                return Err(HashTableError::Snapshot("unexpected EOF".into()));
+            }
+            let val = u32::from_le_bytes(payload[*pos..*pos + 4].try_into().unwrap());
+            *pos += 4;
+            Ok(val)
+        };
+
+        let read_bytes_32 = |pos: &mut usize| -> Result<[u8; 32]> {
+            if *pos + 32 > payload.len() {
+                return Err(HashTableError::Snapshot("unexpected EOF".into()));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&payload[*pos..*pos + 32]);
+            *pos += 32;
+            Ok(arr)
+        };
+
+        // Header
+        let _magic_version = read_u64(&mut pos)?;
+        let _latest_height = read_u64(&mut pos)?;
+        let _latest_hash_height = read_u64(&mut pos)?;
+        let _latest_hash = read_bytes_32(&mut pos)?;
+        let num_entries = read_u64(&mut pos)? as usize;
+        let num_blocks = read_u64(&mut pos)? as usize;
+
+        // Block index
+        let mut block_index = BTreeMap::new();
+        let mut block_hash_to_height = HashMap::new();
+
+        for _ in 0..num_blocks {
+            let height = read_u64(&mut pos)?;
+            let block_hash = read_bytes_32(&mut pos)?;
+            let num_slots = read_u32(&mut pos)? as usize;
+
+            let mut slots = Vec::with_capacity(num_slots);
+            for _ in 0..num_slots {
+                let bucket_idx = read_u32(&mut pos)?;
+                if pos + 2 > payload.len() {
+                    return Err(HashTableError::Snapshot("unexpected EOF".into()));
+                }
+                let slot_idx = payload[pos];
+                pos += 2; // slot_idx + padding
+                slots.push((bucket_idx, slot_idx));
+            }
+
+            block_hash_to_height.insert(block_hash, height);
+            block_index.insert(height, BlockRecord { block_hash, slots });
+        }
+
+        // Bucket data
+        let bucket_data_start = pos;
+        let bucket_data_end = bucket_data_start + NUM_BUCKETS * BUCKET_BYTES;
+        if bucket_data_end > payload.len() {
+            return Err(HashTableError::Snapshot("bucket data truncated".into()));
+        }
+
+        let mut buckets = Vec::with_capacity(NUM_BUCKETS);
+        for i in 0..NUM_BUCKETS {
+            let offset = bucket_data_start + i * BUCKET_BYTES;
+            let mut bucket = Bucket::new();
+            for j in 0..BUCKET_CAPACITY {
+                let entry_start = offset + j * 32;
+                bucket.entries[j].copy_from_slice(&payload[entry_start..entry_start + 32]);
+            }
+            // Reconstruct count as the highest non-zero slot + 1
+            let zero = [0u8; 32];
+            bucket.count = 0;
+            for j in (0..BUCKET_CAPACITY).rev() {
+                if bucket.entries[j] != zero {
+                    bucket.count = (j + 1) as u8;
+                    break;
+                }
+            }
+            buckets.push(bucket);
+        }
+
+        Ok(HashTableDb {
+            buckets,
+            block_index,
+            block_hash_to_height,
+            num_entries,
+        })
+    }
+}

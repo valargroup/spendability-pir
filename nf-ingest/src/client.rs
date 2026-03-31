@@ -1,0 +1,83 @@
+use crate::proto::compact_tx_streamer_client::CompactTxStreamerClient;
+use crate::proto::{BlockId, BlockRange, ChainSpec, CompactBlock};
+use thiserror::Error;
+use tokio_stream::StreamExt;
+use tonic::transport::Channel;
+
+#[derive(Error, Debug)]
+pub enum ClientError {
+    #[error("failed to connect to any endpoint")]
+    NoEndpointAvailable,
+    #[error("gRPC transport error: {0}")]
+    Transport(#[from] tonic::transport::Error),
+    #[error("gRPC status error: {0}")]
+    Status(#[from] tonic::Status),
+}
+
+pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// Wrapper around the lightwalletd gRPC client.
+pub struct LwdClient {
+    inner: CompactTxStreamerClient<Channel>,
+}
+
+impl LwdClient {
+    /// Connect to the first reachable endpoint from the given list.
+    pub async fn connect(endpoints: &[String]) -> Result<Self> {
+        for endpoint in endpoints {
+            match CompactTxStreamerClient::connect(endpoint.clone()).await {
+                Ok(client) => {
+                    tracing::info!(endpoint, "connected to lightwalletd");
+                    return Ok(Self { inner: client });
+                }
+                Err(e) => {
+                    tracing::warn!(endpoint, error = %e, "failed to connect, trying next");
+                }
+            }
+        }
+        Err(ClientError::NoEndpointAvailable)
+    }
+
+    /// Wrap an existing tonic channel (useful for testing with mock servers).
+    pub fn from_channel(channel: Channel) -> Self {
+        Self {
+            inner: CompactTxStreamerClient::new(channel),
+        }
+    }
+
+    /// Get the height and hash of the chain tip.
+    pub async fn get_latest_block(&mut self) -> Result<(u64, Vec<u8>)> {
+        let response = self.inner.get_latest_block(ChainSpec {}).await?;
+        let block_id = response.into_inner();
+        Ok((block_id.height, block_id.hash))
+    }
+
+    /// Stream compact blocks in the given range (inclusive).
+    pub async fn get_block_range(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<CompactBlock>> {
+        let range = BlockRange {
+            start: Some(BlockId {
+                height: start,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: end,
+                hash: vec![],
+            }),
+            pool_types: vec![],
+        };
+
+        let response = self.inner.get_block_range(range).await?;
+        let mut stream = response.into_inner();
+        let mut blocks = Vec::new();
+
+        while let Some(block) = stream.next().await {
+            blocks.push(block?);
+        }
+
+        Ok(blocks)
+    }
+}
