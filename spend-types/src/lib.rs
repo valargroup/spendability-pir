@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 pub const TARGET_SIZE: usize = 1_000_000;
 pub const CONFIRMATION_DEPTH: u64 = 10;
 pub const NUM_BUCKETS: usize = 131_072; // 2^17
@@ -41,7 +43,7 @@ pub struct NewBlock {
     pub nullifiers: Vec<[u8; 32]>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpendabilityMetadata {
     pub earliest_height: u64,
     pub latest_height: u64,
@@ -50,13 +52,39 @@ pub struct SpendabilityMetadata {
     pub phase: ServerPhase,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerPhase {
     Syncing {
         current_height: u64,
         target_height: u64,
     },
     Serving,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YpirScenario {
+    pub num_items: u64,
+    pub item_size_bits: u64,
+}
+
+/// Abstraction over the PIR engine, allowing stub implementations for testing.
+pub trait PirEngine: Send + Sync {
+    type ServerState: Send + Sync;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Offline precomputation: build server state from the raw DB bytes.
+    fn setup(
+        &self,
+        db_bytes: &[u8],
+        scenario: &YpirScenario,
+    ) -> Result<Self::ServerState, Self::Error>;
+
+    /// Online computation: answer a single client query.
+    fn answer_query(
+        &self,
+        state: &Self::ServerState,
+        query_bytes: &[u8],
+    ) -> Result<Vec<u8>, Self::Error>;
 }
 
 #[cfg(test)]
