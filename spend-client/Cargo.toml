@@ -1,0 +1,26 @@
+[package]
+name = "spend-client"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+ypir = []
+
+[dependencies]
+spend-types = { path = "../spend-types" }
+ypir = { git = "https://github.com/valargroup/ypir.git", branch = "valar/artifact", default-features = false }
+spiral-rs = { git = "https://github.com/valargroup/spiral-rs.git", branch = "valar/avoid-avx512" }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+spend-server = { path = "../spend-server", features = ["ypir"] }
+hashtable-pir = { path = "../hashtable-pir" }
+nf-ingest = { path = "../nf-ingest" }
+axum = "0.7"
+tonic = "0.12"
+tokio-stream = "0.1"
+tempfile = "3"

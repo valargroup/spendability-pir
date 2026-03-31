@@ -1669,6 +1669,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "spend-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hashtable-pir",
+ "nf-ingest",
+ "reqwest",
+ "spend-server",
+ "spend-types",
+ "spiral-rs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "ypir",
+]
+
+[[package]]
 name = "spend-server"
 version = "0.1.0"
 dependencies = [
