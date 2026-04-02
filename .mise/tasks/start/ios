@@ -26,7 +26,7 @@ fi
 # ── Open Xcode ──────────────────────────────────────────────────
 if [ -d "$PROJECT" ]; then
     printf '\033[32mOpening secant-mainnet in Xcode...\033[0m\n'
-    open "$PROJECT"
+    open "$(realpath "$PROJECT")" 2>/dev/null || true
     echo ""
     echo "Xcode is ready. Select the secant-mainnet scheme, then Cmd+R to build and run."
     echo "After Rust changes, re-run: mise run start:ios"

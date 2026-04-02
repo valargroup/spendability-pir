@@ -55,11 +55,8 @@ impl SpendClient {
             )));
         }
 
-        let params = Box::leak(Box::new(params_for_scenario_simplepir(
-            scenario.num_items,
-            scenario.item_size_bits,
-        )));
-        let ypir_client = YPIRClient::new(params);
+        let params = params_for_scenario_simplepir(scenario.num_items, scenario.item_size_bits);
+        let ypir_client = YPIRClient::new(&params);
 
         tracing::info!(
             base_url,
