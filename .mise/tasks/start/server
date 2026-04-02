@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#MISE description="Build and run the PIR server (spend-server)"
+#MISE alias="start:server"
+#MISE quiet=true
+set -e
+
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+
+# ── Ensure cargo is on PATH ──────────────────────────────────────
+if [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+fi
+
+# ── Ensure protoc is available ────────────────────────────────────
+if ! command -v protoc &>/dev/null && [ -z "$PROTOC" ]; then
+    PROTOC_VERSION="28.3"
+    PROTOC_DIR="$DIR/.protoc"
+    if [ ! -x "$PROTOC_DIR/bin/protoc" ]; then
+        printf '\033[36mDownloading protoc %s...\033[0m\n' "$PROTOC_VERSION"
+        ARCH="$(uname -m)"
+        case "$(uname -s)-$ARCH" in
+            Darwin-arm64)  PROTOC_ZIP="protoc-${PROTOC_VERSION}-osx-aarch_64.zip" ;;
+            Darwin-x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-osx-x86_64.zip" ;;
+            Linux-x86_64)  PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;;
+            Linux-aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;;
+            *) printf '\033[31mUnsupported platform: %s-%s\033[0m\n' "$(uname -s)" "$ARCH"; exit 1 ;;
+        esac
+        mkdir -p "$PROTOC_DIR"
+        curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}" \
+            -o "$PROTOC_DIR/protoc.zip"
+        unzip -qo "$PROTOC_DIR/protoc.zip" -d "$PROTOC_DIR"
+        rm "$PROTOC_DIR/protoc.zip"
+    fi
+    export PROTOC="$PROTOC_DIR/bin/protoc"
+fi
+
+# ── Defaults ─────────────────────────────────────────────────────
+LWD_URL="${LWD_URL:-https://zec.rocks:443}"
+DATA_DIR="${DATA_DIR:-$DIR/data}"
+LISTEN="${LISTEN:-0.0.0.0:8080}"
+
+# ── Build + run ──────────────────────────────────────────────────
+printf '\033[36mBuilding spend-server (release, ypir)...\033[0m\n'
+cargo build -p spend-server --features ypir --release --manifest-path "$DIR/Cargo.toml"
+printf '\033[32mBuild complete.\033[0m\n'
+
+printf '\033[36mStarting spend-server on %s (lwd: %s)\033[0m\n' "$LISTEN" "$LWD_URL"
+exec cargo run -p spend-server --features ypir --release --manifest-path "$DIR/Cargo.toml" -- \
+    --lwd-url "$LWD_URL" \
+    --data-dir "$DATA_DIR" \
+    --listen "$LISTEN" \
+    "$@"

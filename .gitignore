@@ -1,3 +1,5 @@
 /target
+/data
 /zodl-ios
 /zcash-swift-wallet-sdk
+/.protoc
