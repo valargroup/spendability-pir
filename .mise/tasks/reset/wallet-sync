@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#MISE description="Delete wallet sync data on iOS Simulator (keeps mnemonic in Keychain)"
+#MISE alias="reset:wallet-sync"
+set -e
+
+BUNDLE_ID="${BUNDLE_ID:-co.valargroup.secant-mainnet}"
+
+# Find a booted simulator that has the app installed.
+# "booted" fails when multiple simulators are booted, so try each one.
+DATA_DIR=""
+DEVICE_NAME=""
+while IFS= read -r line; do
+    uuid=$(echo "$line" | grep -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}')
+    [ -z "$uuid" ] && continue
+    if candidate=$(xcrun simctl get_app_container "$uuid" "$BUNDLE_ID" data 2>/dev/null); then
+        DATA_DIR="$candidate"
+        DEVICE_NAME=$(echo "$line" | sed 's/ (.*//')
+        break
+    fi
+done < <(xcrun simctl list devices booted | grep -i 'booted')
+
+if [ -z "$DATA_DIR" ]; then
+    printf '\033[31mError: Could not find app %s on any booted simulator.\033[0m\n' "$BUNDLE_ID"
+    printf 'Make sure a simulator is booted and the app has been installed.\n'
+    exit 1
+fi
+
+printf 'Found app on: %s\n' "$DEVICE_NAME"
+
+DOCUMENTS="$DATA_DIR/Documents"
+
+if [ ! -d "$DOCUMENTS" ]; then
+    printf '\033[33mNo Documents directory found at %s — nothing to clean.\033[0m\n' "$DOCUMENTS"
+    exit 0
+fi
+
+printf 'App data container: %s\n' "$DATA_DIR"
+printf 'Deleting wallet sync data from Documents...\n'
+
+DELETED=0
+
+# SQLite databases (data.db, cache.db, and their WAL/SHM journals)
+for f in "$DOCUMENTS"/*data.db* "$DOCUMENTS"/*cache.db* "$DOCUMENTS"/*pending.db*; do
+    [ -e "$f" ] || continue
+    rm -f "$f"
+    printf '  \033[31m✗\033[0m %s\n' "$(basename "$f")"
+    DELETED=$((DELETED + 1))
+done
+
+# Filesystem block cache (compact blocks)
+for d in "$DOCUMENTS"/mainnet/fs_cache "$DOCUMENTS"/testnet/fs_cache; do
+    [ -d "$d" ] || continue
+    rm -rf "$d"
+    printf '  \033[31m✗\033[0m %s/\n' "$(echo "$d" | sed "s|$DOCUMENTS/||")"
+    DELETED=$((DELETED + 1))
+done
+
+if [ "$DELETED" -eq 0 ]; then
+    printf '\033[33mNo sync data found to delete.\033[0m\n'
+else
+    printf '\033[32mDone. Removed %d item(s). Mnemonic is preserved in Keychain.\033[0m\n' "$DELETED"
+    printf 'Re-launch the app to start a fresh sync.\n'
+fi
