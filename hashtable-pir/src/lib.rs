@@ -6,7 +6,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum HashTableError {
-    #[error("bucket {bucket_idx} overflow: already at capacity {}", BUCKET_CAPACITY)]
+    #[error(
+        "bucket {bucket_idx} overflow: already at capacity {}",
+        BUCKET_CAPACITY
+    )]
     BucketOverflow { bucket_idx: u32 },
     #[error("block hash not found for rollback")]
     BlockNotFound,
@@ -68,7 +71,6 @@ impl Bucket {
         }
         false
     }
-
 }
 
 #[derive(Clone)]
@@ -109,7 +111,9 @@ impl HashTableDb {
             let bucket_idx = hash_to_bucket(nf);
             let bucket = &mut self.buckets[bucket_idx as usize];
 
-            let slot = bucket.find_free_slot().ok_or(HashTableError::BucketOverflow { bucket_idx })?;
+            let slot = bucket
+                .find_free_slot()
+                .ok_or(HashTableError::BucketOverflow { bucket_idx })?;
             bucket.entries[slot as usize] = *nf;
             // Update count if we're extending past it
             if slot >= bucket.count {
@@ -119,10 +123,7 @@ impl HashTableDb {
             self.num_entries += 1;
         }
 
-        let record = BlockRecord {
-            block_hash,
-            slots,
-        };
+        let record = BlockRecord { block_hash, slots };
         self.block_index.insert(height, record);
         self.block_hash_to_height.insert(block_hash, height);
 
@@ -206,10 +207,7 @@ impl HashTableDb {
     }
 
     pub fn latest_block_hash(&self) -> Option<[u8; 32]> {
-        self.block_index
-            .values()
-            .next_back()
-            .map(|r| r.block_hash)
+        self.block_index.values().next_back().map(|r| r.block_hash)
     }
 
     pub fn num_blocks(&self) -> usize {
