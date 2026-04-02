@@ -39,7 +39,7 @@ printf 'Deleting wallet sync data from Documents...\n'
 
 DELETED=0
 
-# SQLite databases (data.db, cache.db, and their WAL/SHM journals)
+# SQLite databases (data.db, cache.db, pending.db and their WAL/SHM journals)
 for f in "$DOCUMENTS"/*data.db* "$DOCUMENTS"/*cache.db* "$DOCUMENTS"/*pending.db*; do
     [ -e "$f" ] || continue
     rm -f "$f"
@@ -48,10 +48,30 @@ for f in "$DOCUMENTS"/*data.db* "$DOCUMENTS"/*cache.db* "$DOCUMENTS"/*pending.db
 done
 
 # Filesystem block cache (compact blocks)
-for d in "$DOCUMENTS"/mainnet/fs_cache "$DOCUMENTS"/testnet/fs_cache; do
+# The SDK may use "main"/"test" or "mainnet"/"testnet" as the network directory name.
+for d in "$DOCUMENTS"/main/fs_cache "$DOCUMENTS"/mainnet/fs_cache \
+         "$DOCUMENTS"/test/fs_cache "$DOCUMENTS"/testnet/fs_cache; do
     [ -d "$d" ] || continue
     rm -rf "$d"
     printf '  \033[31m✗\033[0m %s/\n' "$(echo "$d" | sed "s|$DOCUMENTS/||")"
+    DELETED=$((DELETED + 1))
+done
+
+# SQLite databases that live inside the network directory (e.g. Documents/main/*.sqlite)
+for f in "$DOCUMENTS"/main/*.sqlite* "$DOCUMENTS"/mainnet/*.sqlite* \
+         "$DOCUMENTS"/test/*.sqlite* "$DOCUMENTS"/testnet/*.sqlite*; do
+    [ -e "$f" ] || continue
+    rm -f "$f"
+    printf '  \033[31m✗\033[0m %s\n' "$(echo "$f" | sed "s|$DOCUMENTS/||")"
+    DELETED=$((DELETED + 1))
+done
+
+# App-level storage in Library/Application Support (e.g. ReadTransactionsStorageModel)
+APP_SUPPORT="$DATA_DIR/Library/Application Support"
+for f in "$APP_SUPPORT"/ReadTransactionsStorageModel.sqlite*; do
+    [ -e "$f" ] || continue
+    rm -f "$f"
+    printf '  \033[31m✗\033[0m Library/Application Support/%s\n' "$(basename "$f")"
     DELETED=$((DELETED + 1))
 done
 
