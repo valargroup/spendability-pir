@@ -12,6 +12,16 @@ use tokio::sync::mpsc;
 
 const BACKFILL_BATCH: u64 = 50_000;
 
+/// Lowest block height we'll ever sync. On mainnet this is the NU5 activation
+/// height; on test chains whose tip is below that, fall back to height 1.
+fn min_sync_height(tip_height: u64) -> u64 {
+    if tip_height >= NU5_MAINNET_ACTIVATION {
+        NU5_MAINNET_ACTIVATION
+    } else {
+        1
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
     #[error("ingest error: {0}")]
@@ -162,6 +172,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     };
 
     // Sync mode: catch up to tip, then backfill if we need more nullifiers
+    let floor = min_sync_height(tip_height);
     let forward_start = if from_snapshot {
         hashtable
             .latest_height()
@@ -169,7 +180,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
             .unwrap_or(tip_height)
     } else {
         let initial = tip_height.saturating_sub(BACKFILL_BATCH);
-        initial.max(NU5_MAINNET_ACTIVATION)
+        initial.max(floor)
     };
 
     if forward_start <= tip_height {
@@ -188,13 +199,13 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
         .await?;
     }
 
-    // Backfill earlier blocks until we reach target_size or NU5 activation
+    // Backfill earlier blocks until we reach target_size or the floor height
     if !from_snapshot {
         let mut backfill_end = forward_start.saturating_sub(1);
-        while hashtable.len() < config.target_size && backfill_end >= NU5_MAINNET_ACTIVATION {
+        while hashtable.len() < config.target_size && backfill_end >= floor {
             let backfill_start = backfill_end
                 .saturating_sub(BACKFILL_BATCH - 1)
-                .max(NU5_MAINNET_ACTIVATION);
+                .max(floor);
             tracing::info!(
                 from = backfill_start,
                 to = backfill_end,
@@ -211,7 +222,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
             )
             .await?;
 
-            if backfill_start == NU5_MAINNET_ACTIVATION {
+            if backfill_start == floor {
                 break;
             }
             backfill_end = backfill_start.saturating_sub(1);
@@ -332,6 +343,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
         Err(_) => (HashTableDb::new(), false),
     };
 
+    let floor = min_sync_height(tip_height);
     let forward_start = if from_snapshot {
         hashtable
             .latest_height()
@@ -339,7 +351,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
             .unwrap_or(tip_height)
     } else {
         let initial = tip_height.saturating_sub(BACKFILL_BATCH);
-        initial.max(NU5_MAINNET_ACTIVATION)
+        initial.max(floor)
     };
 
     if forward_start <= tip_height {
@@ -359,10 +371,10 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
 
     if !from_snapshot {
         let mut backfill_end = forward_start.saturating_sub(1);
-        while hashtable.len() < config.target_size && backfill_end >= NU5_MAINNET_ACTIVATION {
+        while hashtable.len() < config.target_size && backfill_end >= floor {
             let backfill_start = backfill_end
                 .saturating_sub(BACKFILL_BATCH - 1)
-                .max(NU5_MAINNET_ACTIVATION);
+                .max(floor);
             sync_range(
                 &config.lwd_urls,
                 backfill_start,
@@ -372,7 +384,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
             )
             .await?;
 
-            if backfill_start == NU5_MAINNET_ACTIVATION {
+            if backfill_start == floor {
                 break;
             }
             backfill_end = backfill_start.saturating_sub(1);

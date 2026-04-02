@@ -2,9 +2,9 @@
 //!
 //! Prerequisites:
 //!   1. Start the server: cargo run -p spend-server --features ypir --release -- \
-//!        --lwd-url https://zec.rocks:443 --data-dir ./data
+//!      --lwd-url https://zec.rocks:443 --data-dir ./data
 //!   2. Run this test: cargo test -p spend-client --features live --test live_test -- \
-//!        --nocapture --ignored
+//!      --nocapture --ignored
 //!
 //! This test is ignored by default so it doesn't run in CI.
 
