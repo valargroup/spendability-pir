@@ -38,17 +38,16 @@ impl CompactTxStreamer for MockStreamer {
         _request: Request<ChainSpec>,
     ) -> Result<Response<BlockId>, Status> {
         let blocks = self.state.blocks.lock().unwrap();
-        let tip = blocks.last().ok_or_else(|| Status::not_found("no blocks"))?;
+        let tip = blocks
+            .last()
+            .ok_or_else(|| Status::not_found("no blocks"))?;
         Ok(Response::new(BlockId {
             height: tip.height,
             hash: tip.hash.clone(),
         }))
     }
 
-    async fn get_block(
-        &self,
-        request: Request<BlockId>,
-    ) -> Result<Response<CompactBlock>, Status> {
+    async fn get_block(&self, request: Request<BlockId>) -> Result<Response<CompactBlock>, Status> {
         let block_id = request.into_inner();
         let blocks = self.state.blocks.lock().unwrap();
         let block = blocks
@@ -66,8 +65,7 @@ impl CompactTxStreamer for MockStreamer {
         self.get_block(request).await
     }
 
-    type GetBlockRangeStream =
-        tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
+    type GetBlockRangeStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
 
     async fn get_block_range(
         &self,
@@ -147,8 +145,7 @@ impl CompactTxStreamer for MockStreamer {
         Err(Status::unimplemented("not needed for tests"))
     }
 
-    type GetMempoolTxStream =
-        tokio_stream::Iter<std::vec::IntoIter<Result<CompactTx, Status>>>;
+    type GetMempoolTxStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactTx, Status>>>;
 
     async fn get_mempool_tx(
         &self,
@@ -215,10 +212,7 @@ impl CompactTxStreamer for MockStreamer {
         Err(Status::unimplemented("not needed for tests"))
     }
 
-    async fn ping(
-        &self,
-        _request: Request<Duration>,
-    ) -> Result<Response<PingResponse>, Status> {
+    async fn ping(&self, _request: Request<Duration>) -> Result<Response<PingResponse>, Status> {
         Err(Status::unimplemented("not needed for tests"))
     }
 }
@@ -236,7 +230,9 @@ pub async fn spawn_mock_server(state: MockState) -> (SocketAddr, oneshot::Sender
             .add_service(CompactTxStreamerServer::new(streamer))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
-                async { rx.await.ok(); },
+                async {
+                    rx.await.ok();
+                },
             )
             .await
             .unwrap();
@@ -315,18 +311,23 @@ async fn test_sync_stream_mock() {
     state.set_blocks(blocks);
 
     let (addr, _shutdown) = spawn_mock_server(state).await;
-    let mut client =
-        nf_ingest::LwdClient::connect(&[format!("http://{addr}")]).await.unwrap();
+    let mut client = nf_ingest::LwdClient::connect(&[format!("http://{addr}")])
+        .await
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(200);
-    nf_ingest::ingest::sync(&mut client, 1, 100, &tx).await.unwrap();
+    nf_ingest::ingest::sync(&mut client, 1, 100, &tx)
+        .await
+        .unwrap();
     drop(tx);
 
     let mut received_count = 0;
     let mut last_height = 0;
     while let Some(event) = rx.recv().await {
         match event {
-            spend_types::ChainEvent::NewBlock { height, nullifiers, .. } => {
+            spend_types::ChainEvent::NewBlock {
+                height, nullifiers, ..
+            } => {
                 assert!(height > last_height, "blocks should arrive in order");
                 last_height = height;
                 received_count += nullifiers.len();
@@ -356,13 +357,15 @@ async fn test_follow_new_blocks_mock() {
     state.set_blocks(blocks);
 
     let (addr, shutdown) = spawn_mock_server(state.clone()).await;
-    let mut client =
-        nf_ingest::LwdClient::connect(&[format!("http://{addr}")]).await.unwrap();
+    let mut client = nf_ingest::LwdClient::connect(&[format!("http://{addr}")])
+        .await
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let follow_handle = tokio::spawn(async move {
-        nf_ingest::ingest::follow(&mut client, 5, hash_for(5), &tx).await
-    });
+    let follow_handle =
+        tokio::spawn(
+            async move { nf_ingest::ingest::follow(&mut client, 5, hash_for(5), &tx).await },
+        );
 
     // Add block 6 after a delay
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -404,13 +407,15 @@ async fn test_follow_reorg_mock() {
     state.set_blocks(blocks);
 
     let (addr, shutdown) = spawn_mock_server(state.clone()).await;
-    let mut client =
-        nf_ingest::LwdClient::connect(&[format!("http://{addr}")]).await.unwrap();
+    let mut client = nf_ingest::LwdClient::connect(&[format!("http://{addr}")])
+        .await
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let follow_handle = tokio::spawn(async move {
-        nf_ingest::ingest::follow(&mut client, 3, hash_for(3), &tx).await
-    });
+    let follow_handle =
+        tokio::spawn(
+            async move { nf_ingest::ingest::follow(&mut client, 3, hash_for(3), &tx).await },
+        );
 
     // Simulate reorg: replace block 3 with 3' (different hash) and add block 4
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -439,7 +444,10 @@ async fn test_follow_reorg_mock() {
             // and the chain tracker sees prev_hash mismatch
             assert!(*height >= 4);
         }
-        spend_types::ChainEvent::Reorg { orphaned, new_blocks } => {
+        spend_types::ChainEvent::Reorg {
+            orphaned,
+            new_blocks,
+        } => {
             assert!(!orphaned.is_empty() || !new_blocks.is_empty());
         }
     }

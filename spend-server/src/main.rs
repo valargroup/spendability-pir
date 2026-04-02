@@ -2,14 +2,17 @@ use clap::Parser;
 use spend_server::pir_ypir::YpirPirEngine;
 use spend_server::server;
 use spend_server::state::ServerConfig;
-use spend_types::{BUCKET_BYTES, CONFIRMATION_DEPTH, NUM_BUCKETS, TARGET_SIZE, YpirScenario};
+use spend_types::{YpirScenario, BUCKET_BYTES, CONFIRMATION_DEPTH, NUM_BUCKETS, TARGET_SIZE};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "spend-server", about = "Private nullifier spendability server using YPIR")]
+#[command(
+    name = "spend-server",
+    about = "Private nullifier spendability server using YPIR"
+)]
 struct Cli {
     /// Directory for snapshots and hint cache
     #[arg(long, default_value = "./data")]
@@ -35,7 +38,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();

@@ -39,50 +39,148 @@ struct MockStreamer {
 impl CompactTxStreamer for MockStreamer {
     async fn get_latest_block(&self, _: Request<ChainSpec>) -> Result<Response<BlockId>, Status> {
         let blocks = self.state.blocks.lock().unwrap();
-        let tip = blocks.last().ok_or_else(|| Status::not_found("no blocks"))?;
-        Ok(Response::new(BlockId { height: tip.height, hash: tip.hash.clone() }))
+        let tip = blocks
+            .last()
+            .ok_or_else(|| Status::not_found("no blocks"))?;
+        Ok(Response::new(BlockId {
+            height: tip.height,
+            hash: tip.hash.clone(),
+        }))
     }
     async fn get_block(&self, req: Request<BlockId>) -> Result<Response<CompactBlock>, Status> {
         let id = req.into_inner();
         let blocks = self.state.blocks.lock().unwrap();
-        blocks.iter().find(|b| b.height == id.height).cloned().map(Response::new)
+        blocks
+            .iter()
+            .find(|b| b.height == id.height)
+            .cloned()
+            .map(Response::new)
             .ok_or_else(|| Status::not_found("block not found"))
     }
-    async fn get_block_nullifiers(&self, req: Request<BlockId>) -> Result<Response<CompactBlock>, Status> { self.get_block(req).await }
+    async fn get_block_nullifiers(
+        &self,
+        req: Request<BlockId>,
+    ) -> Result<Response<CompactBlock>, Status> {
+        self.get_block(req).await
+    }
     type GetBlockRangeStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
-    async fn get_block_range(&self, req: Request<BlockRange>) -> Result<Response<Self::GetBlockRangeStream>, Status> {
+    async fn get_block_range(
+        &self,
+        req: Request<BlockRange>,
+    ) -> Result<Response<Self::GetBlockRangeStream>, Status> {
         let range = req.into_inner();
         let start = range.start.as_ref().map(|b| b.height).unwrap_or(0);
         let end = range.end.as_ref().map(|b| b.height).unwrap_or(0);
         let blocks = self.state.blocks.lock().unwrap();
-        let mut result: Vec<Result<CompactBlock, Status>> = blocks.iter()
-            .filter(|b| b.height >= start && b.height <= end).cloned().map(Ok).collect();
+        let mut result: Vec<Result<CompactBlock, Status>> = blocks
+            .iter()
+            .filter(|b| b.height >= start && b.height <= end)
+            .cloned()
+            .map(Ok)
+            .collect();
         result.sort_by_key(|r: &Result<CompactBlock, Status>| r.as_ref().unwrap().height);
         Ok(Response::new(tokio_stream::iter(result)))
     }
-    type GetBlockRangeNullifiersStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
-    async fn get_block_range_nullifiers(&self, req: Request<BlockRange>) -> Result<Response<Self::GetBlockRangeNullifiersStream>, Status> { self.get_block_range(req).await }
-    async fn get_transaction(&self, _: Request<TxFilter>) -> Result<Response<RawTransaction>, Status> { Err(Status::unimplemented("")) }
-    async fn send_transaction(&self, _: Request<RawTransaction>) -> Result<Response<SendResponse>, Status> { Err(Status::unimplemented("")) }
-    type GetTaddressTxidsStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
-    async fn get_taddress_txids(&self, _: Request<TransparentAddressBlockFilter>) -> Result<Response<Self::GetTaddressTxidsStream>, Status> { Err(Status::unimplemented("")) }
-    type GetTaddressTransactionsStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
-    async fn get_taddress_transactions(&self, _: Request<TransparentAddressBlockFilter>) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_taddress_balance(&self, _: Request<AddressList>) -> Result<Response<Balance>, Status> { Err(Status::unimplemented("")) }
-    async fn get_taddress_balance_stream(&self, _: Request<tonic::Streaming<Address>>) -> Result<Response<Balance>, Status> { Err(Status::unimplemented("")) }
+    type GetBlockRangeNullifiersStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
+    async fn get_block_range_nullifiers(
+        &self,
+        req: Request<BlockRange>,
+    ) -> Result<Response<Self::GetBlockRangeNullifiersStream>, Status> {
+        self.get_block_range(req).await
+    }
+    async fn get_transaction(
+        &self,
+        _: Request<TxFilter>,
+    ) -> Result<Response<RawTransaction>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn send_transaction(
+        &self,
+        _: Request<RawTransaction>,
+    ) -> Result<Response<SendResponse>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetTaddressTxidsStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    async fn get_taddress_txids(
+        &self,
+        _: Request<TransparentAddressBlockFilter>,
+    ) -> Result<Response<Self::GetTaddressTxidsStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetTaddressTransactionsStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    async fn get_taddress_transactions(
+        &self,
+        _: Request<TransparentAddressBlockFilter>,
+    ) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_taddress_balance(
+        &self,
+        _: Request<AddressList>,
+    ) -> Result<Response<Balance>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_taddress_balance_stream(
+        &self,
+        _: Request<tonic::Streaming<Address>>,
+    ) -> Result<Response<Balance>, Status> {
+        Err(Status::unimplemented(""))
+    }
     type GetMempoolTxStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactTx, Status>>>;
-    async fn get_mempool_tx(&self, _: Request<GetMempoolTxRequest>) -> Result<Response<Self::GetMempoolTxStream>, Status> { Err(Status::unimplemented("")) }
-    type GetMempoolStreamStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
-    async fn get_mempool_stream(&self, _: Request<Empty>) -> Result<Response<Self::GetMempoolStreamStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_tree_state(&self, _: Request<BlockId>) -> Result<Response<TreeState>, Status> { Err(Status::unimplemented("")) }
-    async fn get_latest_tree_state(&self, _: Request<Empty>) -> Result<Response<TreeState>, Status> { Err(Status::unimplemented("")) }
-    type GetSubtreeRootsStream = tokio_stream::Iter<std::vec::IntoIter<Result<SubtreeRoot, Status>>>;
-    async fn get_subtree_roots(&self, _: Request<GetSubtreeRootsArg>) -> Result<Response<Self::GetSubtreeRootsStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_address_utxos(&self, _: Request<GetAddressUtxosArg>) -> Result<Response<GetAddressUtxosReplyList>, Status> { Err(Status::unimplemented("")) }
-    type GetAddressUtxosStreamStream = tokio_stream::Iter<std::vec::IntoIter<Result<GetAddressUtxosReply, Status>>>;
-    async fn get_address_utxos_stream(&self, _: Request<GetAddressUtxosArg>) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_lightd_info(&self, _: Request<Empty>) -> Result<Response<LightdInfo>, Status> { Err(Status::unimplemented("")) }
-    async fn ping(&self, _: Request<Duration>) -> Result<Response<PingResponse>, Status> { Err(Status::unimplemented("")) }
+    async fn get_mempool_tx(
+        &self,
+        _: Request<GetMempoolTxRequest>,
+    ) -> Result<Response<Self::GetMempoolTxStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetMempoolStreamStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    async fn get_mempool_stream(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<Self::GetMempoolStreamStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_tree_state(&self, _: Request<BlockId>) -> Result<Response<TreeState>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_latest_tree_state(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<TreeState>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetSubtreeRootsStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<SubtreeRoot, Status>>>;
+    async fn get_subtree_roots(
+        &self,
+        _: Request<GetSubtreeRootsArg>,
+    ) -> Result<Response<Self::GetSubtreeRootsStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_address_utxos(
+        &self,
+        _: Request<GetAddressUtxosArg>,
+    ) -> Result<Response<GetAddressUtxosReplyList>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetAddressUtxosStreamStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<GetAddressUtxosReply, Status>>>;
+    async fn get_address_utxos_stream(
+        &self,
+        _: Request<GetAddressUtxosArg>,
+    ) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_lightd_info(&self, _: Request<Empty>) -> Result<Response<LightdInfo>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn ping(&self, _: Request<Duration>) -> Result<Response<PingResponse>, Status> {
+        Err(Status::unimplemented(""))
+    }
 }
 
 async fn spawn_mock_lwd(state: MockState) -> (SocketAddr, oneshot::Sender<()>) {
@@ -94,7 +192,9 @@ async fn spawn_mock_lwd(state: MockState) -> (SocketAddr, oneshot::Sender<()>) {
             .add_service(CompactTxStreamerServer::new(MockStreamer { state }))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
-                async { rx.await.ok(); },
+                async {
+                    rx.await.ok();
+                },
             )
             .await
             .unwrap();
@@ -142,7 +242,10 @@ fn make_compact_block(
         vtx: if actions.is_empty() {
             vec![]
         } else {
-            vec![CompactTx { actions, ..Default::default() }]
+            vec![CompactTx {
+                actions,
+                ..Default::default()
+            }]
         },
         ..Default::default()
     }
@@ -158,7 +261,12 @@ async fn test_end_to_end_is_spent() {
     let mut blocks = Vec::new();
     for i in 1u16..=20 {
         let nfs: Vec<[u8; 32]> = (0..5).map(|j| make_nf(i as u32 * 1000 + j)).collect();
-        blocks.push(make_compact_block(i as u64, hash_for(i), hash_for(i - 1), &nfs));
+        blocks.push(make_compact_block(
+            i as u64,
+            hash_for(i),
+            hash_for(i - 1),
+            &nfs,
+        ));
         all_nfs.push(nfs);
     }
     mock.set_blocks(blocks);

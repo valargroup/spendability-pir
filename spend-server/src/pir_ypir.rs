@@ -59,8 +59,7 @@ impl PirEngine for YpirPirEngine {
         let pt_iter = FilePtIter::new(cursor, BUCKET_BYTES, db_cols, pt_bits);
 
         let server = YServer::<u16>::new(self.params, pt_iter, true, false, true);
-        let offline_vals =
-            server.perform_offline_precomputation_simplepir(None, None, None);
+        let offline_vals = server.perform_offline_precomputation_simplepir(None, None, None);
 
         Ok(YpirServerState {
             server,

@@ -64,11 +64,7 @@ impl LwdClient {
     }
 
     /// Stream compact blocks in the given range (inclusive).
-    pub async fn get_block_range(
-        &mut self,
-        start: u64,
-        end: u64,
-    ) -> Result<Vec<CompactBlock>> {
+    pub async fn get_block_range(&mut self, start: u64, end: u64) -> Result<Vec<CompactBlock>> {
         let range = BlockRange {
             start: Some(BlockId {
                 height: start,

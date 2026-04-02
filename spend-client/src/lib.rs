@@ -1,6 +1,4 @@
-use spend_types::{
-    hash_to_bucket, SpendabilityMetadata, YpirScenario, BUCKET_BYTES, ENTRY_BYTES,
-};
+use spend_types::{hash_to_bucket, SpendabilityMetadata, YpirScenario, BUCKET_BYTES, ENTRY_BYTES};
 use thiserror::Error;
 use ypir::client::YPIRClient;
 use ypir::params::params_for_scenario_simplepir;
@@ -42,10 +40,7 @@ impl SpendClient {
             .json()
             .await?;
 
-        let metadata_resp = http
-            .get(format!("{base_url}/metadata"))
-            .send()
-            .await?;
+        let metadata_resp = http.get(format!("{base_url}/metadata")).send().await?;
 
         if metadata_resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return Err(SpendClientError::ServerUnavailable);

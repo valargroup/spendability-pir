@@ -41,12 +41,7 @@ impl ChainTracker {
     }
 
     /// Push a new block. Returns whether it extends the chain or triggers a reorg.
-    pub fn push_block(
-        &mut self,
-        height: u64,
-        hash: [u8; 32],
-        prev_hash: [u8; 32],
-    ) -> ChainAction {
+    pub fn push_block(&mut self, height: u64, hash: [u8; 32], prev_hash: [u8; 32]) -> ChainAction {
         if let Some((tip_height, tip_hash)) = self.chain.back() {
             if prev_hash == *tip_hash && height == tip_height + 1 {
                 // Normal extension
@@ -111,18 +106,9 @@ mod tests {
     fn test_chain_tracker_extend() {
         let mut tracker = ChainTracker::new(100);
 
-        assert_eq!(
-            tracker.push_block(1, hash(1), hash(0)),
-            ChainAction::Extend
-        );
-        assert_eq!(
-            tracker.push_block(2, hash(2), hash(1)),
-            ChainAction::Extend
-        );
-        assert_eq!(
-            tracker.push_block(3, hash(3), hash(2)),
-            ChainAction::Extend
-        );
+        assert_eq!(tracker.push_block(1, hash(1), hash(0)), ChainAction::Extend);
+        assert_eq!(tracker.push_block(2, hash(2), hash(1)), ChainAction::Extend);
+        assert_eq!(tracker.push_block(3, hash(3), hash(2)), ChainAction::Extend);
 
         assert_eq!(tracker.tip(), Some((3, hash(3))));
     }

@@ -63,7 +63,10 @@ async fn test_live_real_nullifier_is_spent() {
                 "  Found {} nullifiers at height {} (using first one: {:02x}{:02x}{:02x}{:02x}...)",
                 nfs.len(),
                 block.height,
-                nfs[0][0], nfs[0][1], nfs[0][2], nfs[0][3],
+                nfs[0][0],
+                nfs[0][1],
+                nfs[0][2],
+                nfs[0][3],
             );
             break;
         }

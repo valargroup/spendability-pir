@@ -1,7 +1,9 @@
 #![cfg(feature = "ypir")]
 
 use spend_server::pir_ypir::YpirPirEngine;
-use spend_types::{hash_to_bucket, PirEngine, YpirScenario, BUCKET_BYTES, ENTRY_BYTES, NUM_BUCKETS};
+use spend_types::{
+    hash_to_bucket, PirEngine, YpirScenario, BUCKET_BYTES, ENTRY_BYTES, NUM_BUCKETS,
+};
 use std::time::Instant;
 use ypir::client::YPIRClient;
 use ypir::serialize::ToBytes;

@@ -60,10 +60,7 @@ fn rebuild_pir<P: PirEngine>(
 }
 
 /// Main server entry point. Runs sync mode, transitions to follow mode, serves HTTP.
-pub async fn run<P: PirEngine + 'static>(
-    config: ServerConfig,
-    engine: Arc<P>,
-) -> Result<()> {
+pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -> Result<()> {
     let app_state = Arc::new(AppState::new(config.clone(), engine.clone()));
 
     // Start HTTP server immediately (returns 503 during sync)

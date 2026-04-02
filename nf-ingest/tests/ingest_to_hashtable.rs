@@ -20,7 +20,10 @@ fn make_nf(seed: u32) -> [u8; 32] {
 }
 
 /// Build a chain of compact blocks, each with `nfs_per_block` random nullifiers.
-fn build_chain(count: u16, nfs_per_block: u32) -> (Vec<nf_ingest::proto::CompactBlock>, Vec<Vec<[u8; 32]>>) {
+fn build_chain(
+    count: u16,
+    nfs_per_block: u32,
+) -> (Vec<nf_ingest::proto::CompactBlock>, Vec<Vec<[u8; 32]>>) {
     let mut blocks = Vec::new();
     let mut all_nfs = Vec::new();
     for i in 1..=count {
@@ -46,12 +49,15 @@ async fn test_sync_into_hashtable() {
     state.set_blocks(blocks);
 
     let (addr, _shutdown) = spawn_mock_server(state).await;
-    let mut client =
-        nf_ingest::LwdClient::connect(&[format!("http://{addr}")]).await.unwrap();
+    let mut client = nf_ingest::LwdClient::connect(&[format!("http://{addr}")])
+        .await
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let sync_handle = tokio::spawn(async move {
-        nf_ingest::ingest::sync(&mut client, 1, 500, &tx).await.unwrap();
+        nf_ingest::ingest::sync(&mut client, 1, 500, &tx)
+            .await
+            .unwrap();
     });
 
     let mut db = HashTableDb::new();
@@ -79,8 +85,15 @@ async fn test_sync_into_hashtable() {
     sync_handle.await.unwrap();
     let (db, events_received) = drain_handle.await.unwrap();
 
-    assert_eq!(events_received, 500, "should receive exactly 500 block events");
-    assert_eq!(db.len(), total_nfs, "hashtable should contain all nullifiers");
+    assert_eq!(
+        events_received, 500,
+        "should receive exactly 500 block events"
+    );
+    assert_eq!(
+        db.len(),
+        total_nfs,
+        "hashtable should contain all nullifiers"
+    );
     assert_eq!(db.earliest_height(), Some(1));
     assert_eq!(db.latest_height(), Some(500));
 
@@ -101,16 +114,25 @@ async fn test_sync_reorg_rollback_and_snapshot() {
     state.set_blocks(blocks);
 
     let (addr, shutdown) = spawn_mock_server(state.clone()).await;
-    let mut client =
-        nf_ingest::LwdClient::connect(&[format!("http://{addr}")]).await.unwrap();
+    let mut client = nf_ingest::LwdClient::connect(&[format!("http://{addr}")])
+        .await
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
-    nf_ingest::ingest::sync(&mut client, 1, 100, &tx).await.unwrap();
+    nf_ingest::ingest::sync(&mut client, 1, 100, &tx)
+        .await
+        .unwrap();
     drop(tx);
 
     let mut db = HashTableDb::new();
     while let Some(event) = rx.recv().await {
-        if let ChainEvent::NewBlock { height, hash, nullifiers, .. } = event {
+        if let ChainEvent::NewBlock {
+            height,
+            hash,
+            nullifiers,
+            ..
+        } = event
+        {
             db.insert_block(height, hash, &nullifiers).unwrap();
         }
     }
@@ -130,7 +152,10 @@ async fn test_sync_reorg_rollback_and_snapshot() {
         assert!(!db.contains(nf), "orphaned nf from block 99 should be gone");
     }
     for nf in &all_nfs[99] {
-        assert!(!db.contains(nf), "orphaned nf from block 100 should be gone");
+        assert!(
+            !db.contains(nf),
+            "orphaned nf from block 100 should be gone"
+        );
     }
 
     // Phase 3: Insert replacement blocks (the "new chain" after reorg)
@@ -141,8 +166,10 @@ async fn test_sync_reorg_rollback_and_snapshot() {
     let mut new_hash_100 = [0u8; 32];
     new_hash_100[0] = 0xBB;
 
-    db.insert_block(99, new_hash_99, &replacement_nfs_99).unwrap();
-    db.insert_block(100, new_hash_100, &replacement_nfs_100).unwrap();
+    db.insert_block(99, new_hash_99, &replacement_nfs_99)
+        .unwrap();
+    db.insert_block(100, new_hash_100, &replacement_nfs_100)
+        .unwrap();
     assert_eq!(db.len(), 500);
 
     for nf in &replacement_nfs_99 {
@@ -166,7 +193,8 @@ async fn test_sync_reorg_rollback_and_snapshot() {
         for nf in block_nfs {
             assert!(
                 restored.contains(nf),
-                "block {} nf missing after snapshot restore", i + 1,
+                "block {} nf missing after snapshot restore",
+                i + 1,
             );
         }
     }
@@ -190,16 +218,25 @@ async fn test_eviction_during_sync() {
     state.set_blocks(blocks);
 
     let (addr, _shutdown) = spawn_mock_server(state).await;
-    let mut client =
-        nf_ingest::LwdClient::connect(&[format!("http://{addr}")]).await.unwrap();
+    let mut client = nf_ingest::LwdClient::connect(&[format!("http://{addr}")])
+        .await
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
-    nf_ingest::ingest::sync(&mut client, 1, 200, &tx).await.unwrap();
+    nf_ingest::ingest::sync(&mut client, 1, 200, &tx)
+        .await
+        .unwrap();
     drop(tx);
 
     let mut db = HashTableDb::new();
     while let Some(event) = rx.recv().await {
-        if let ChainEvent::NewBlock { height, hash, nullifiers, .. } = event {
+        if let ChainEvent::NewBlock {
+            height,
+            hash,
+            nullifiers,
+            ..
+        } = event
+        {
             db.insert_block(height, hash, &nullifiers).unwrap();
         }
     }

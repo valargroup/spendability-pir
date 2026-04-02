@@ -44,7 +44,9 @@ impl CompactTxStreamer for MockStreamer {
         _req: Request<ChainSpec>,
     ) -> Result<Response<BlockId>, Status> {
         let blocks = self.state.blocks.lock().unwrap();
-        let tip = blocks.last().ok_or_else(|| Status::not_found("no blocks"))?;
+        let tip = blocks
+            .last()
+            .ok_or_else(|| Status::not_found("no blocks"))?;
         Ok(Response::new(BlockId {
             height: tip.height,
             hash: tip.hash.clone(),
@@ -69,8 +71,7 @@ impl CompactTxStreamer for MockStreamer {
         self.get_block(req).await
     }
 
-    type GetBlockRangeStream =
-        tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
+    type GetBlockRangeStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactBlock, Status>>>;
 
     async fn get_block_range(
         &self,
@@ -99,27 +100,98 @@ impl CompactTxStreamer for MockStreamer {
         self.get_block_range(req).await
     }
 
-    async fn get_transaction(&self, _: Request<TxFilter>) -> Result<Response<RawTransaction>, Status> { Err(Status::unimplemented("")) }
-    async fn send_transaction(&self, _: Request<RawTransaction>) -> Result<Response<SendResponse>, Status> { Err(Status::unimplemented("")) }
-    type GetTaddressTxidsStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
-    async fn get_taddress_txids(&self, _: Request<TransparentAddressBlockFilter>) -> Result<Response<Self::GetTaddressTxidsStream>, Status> { Err(Status::unimplemented("")) }
-    type GetTaddressTransactionsStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
-    async fn get_taddress_transactions(&self, _: Request<TransparentAddressBlockFilter>) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_taddress_balance(&self, _: Request<AddressList>) -> Result<Response<Balance>, Status> { Err(Status::unimplemented("")) }
-    async fn get_taddress_balance_stream(&self, _: Request<tonic::Streaming<Address>>) -> Result<Response<Balance>, Status> { Err(Status::unimplemented("")) }
+    async fn get_transaction(
+        &self,
+        _: Request<TxFilter>,
+    ) -> Result<Response<RawTransaction>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn send_transaction(
+        &self,
+        _: Request<RawTransaction>,
+    ) -> Result<Response<SendResponse>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetTaddressTxidsStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    async fn get_taddress_txids(
+        &self,
+        _: Request<TransparentAddressBlockFilter>,
+    ) -> Result<Response<Self::GetTaddressTxidsStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetTaddressTransactionsStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    async fn get_taddress_transactions(
+        &self,
+        _: Request<TransparentAddressBlockFilter>,
+    ) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_taddress_balance(
+        &self,
+        _: Request<AddressList>,
+    ) -> Result<Response<Balance>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_taddress_balance_stream(
+        &self,
+        _: Request<tonic::Streaming<Address>>,
+    ) -> Result<Response<Balance>, Status> {
+        Err(Status::unimplemented(""))
+    }
     type GetMempoolTxStream = tokio_stream::Iter<std::vec::IntoIter<Result<CompactTx, Status>>>;
-    async fn get_mempool_tx(&self, _: Request<GetMempoolTxRequest>) -> Result<Response<Self::GetMempoolTxStream>, Status> { Err(Status::unimplemented("")) }
-    type GetMempoolStreamStream = tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
-    async fn get_mempool_stream(&self, _: Request<Empty>) -> Result<Response<Self::GetMempoolStreamStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_tree_state(&self, _: Request<BlockId>) -> Result<Response<TreeState>, Status> { Err(Status::unimplemented("")) }
-    async fn get_latest_tree_state(&self, _: Request<Empty>) -> Result<Response<TreeState>, Status> { Err(Status::unimplemented("")) }
-    type GetSubtreeRootsStream = tokio_stream::Iter<std::vec::IntoIter<Result<SubtreeRoot, Status>>>;
-    async fn get_subtree_roots(&self, _: Request<GetSubtreeRootsArg>) -> Result<Response<Self::GetSubtreeRootsStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_address_utxos(&self, _: Request<GetAddressUtxosArg>) -> Result<Response<GetAddressUtxosReplyList>, Status> { Err(Status::unimplemented("")) }
-    type GetAddressUtxosStreamStream = tokio_stream::Iter<std::vec::IntoIter<Result<GetAddressUtxosReply, Status>>>;
-    async fn get_address_utxos_stream(&self, _: Request<GetAddressUtxosArg>) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> { Err(Status::unimplemented("")) }
-    async fn get_lightd_info(&self, _: Request<Empty>) -> Result<Response<LightdInfo>, Status> { Err(Status::unimplemented("")) }
-    async fn ping(&self, _: Request<Duration>) -> Result<Response<PingResponse>, Status> { Err(Status::unimplemented("")) }
+    async fn get_mempool_tx(
+        &self,
+        _: Request<GetMempoolTxRequest>,
+    ) -> Result<Response<Self::GetMempoolTxStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetMempoolStreamStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<RawTransaction, Status>>>;
+    async fn get_mempool_stream(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<Self::GetMempoolStreamStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_tree_state(&self, _: Request<BlockId>) -> Result<Response<TreeState>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_latest_tree_state(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<TreeState>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetSubtreeRootsStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<SubtreeRoot, Status>>>;
+    async fn get_subtree_roots(
+        &self,
+        _: Request<GetSubtreeRootsArg>,
+    ) -> Result<Response<Self::GetSubtreeRootsStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_address_utxos(
+        &self,
+        _: Request<GetAddressUtxosArg>,
+    ) -> Result<Response<GetAddressUtxosReplyList>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    type GetAddressUtxosStreamStream =
+        tokio_stream::Iter<std::vec::IntoIter<Result<GetAddressUtxosReply, Status>>>;
+    async fn get_address_utxos_stream(
+        &self,
+        _: Request<GetAddressUtxosArg>,
+    ) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn get_lightd_info(&self, _: Request<Empty>) -> Result<Response<LightdInfo>, Status> {
+        Err(Status::unimplemented(""))
+    }
+    async fn ping(&self, _: Request<Duration>) -> Result<Response<PingResponse>, Status> {
+        Err(Status::unimplemented(""))
+    }
 }
 
 async fn spawn_mock_lwd(state: MockState) -> (SocketAddr, oneshot::Sender<()>) {
@@ -431,9 +503,7 @@ async fn test_server_follow_new_block() {
 
     // Simulate follow: insert a new block
     let new_nfs = vec![make_nf(99_000), make_nf(99_001)];
-    hashtable
-        .insert_block(11, hash_for(11), &new_nfs)
-        .unwrap();
+    hashtable.insert_block(11, hash_for(11), &new_nfs).unwrap();
     hashtable.evict_to_target();
 
     // Rebuild PIR and swap (as the follow loop does)
@@ -446,12 +516,12 @@ async fn test_server_follow_new_block() {
         num_buckets: NUM_BUCKETS as u64,
         phase: spend_types::ServerPhase::Serving,
     };
-    app_state.live_pir.store(Arc::new(Some(
-        spend_server::state::PirState {
+    app_state
+        .live_pir
+        .store(Arc::new(Some(spend_server::state::PirState {
             engine_state,
             metadata,
-        },
-    )));
+        })));
 
     let guard = app_state.live_pir.load();
     match guard.as_ref() {
@@ -511,12 +581,12 @@ async fn test_server_reorg_handling() {
         num_buckets: NUM_BUCKETS as u64,
         phase: spend_types::ServerPhase::Serving,
     };
-    app_state.live_pir.store(Arc::new(Some(
-        spend_server::state::PirState {
+    app_state
+        .live_pir
+        .store(Arc::new(Some(spend_server::state::PirState {
             engine_state,
             metadata,
-        },
-    )));
+        })));
 
     // Old block 10 nullifiers should be gone
     for nf in &all_nfs[9] {

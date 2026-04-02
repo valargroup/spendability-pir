@@ -1,8 +1,8 @@
-pub mod proto;
-pub mod parser;
 pub mod chain_tracker;
 pub mod client;
 pub mod ingest;
+pub mod parser;
+pub mod proto;
 
 pub use chain_tracker::ChainAction;
 pub use client::LwdClient;

@@ -36,9 +36,7 @@ pub async fn health<P: PirEngine + 'static>(
     })
 }
 
-pub async fn metadata<P: PirEngine + 'static>(
-    State(state): State<Arc<AppState<P>>>,
-) -> Response {
+pub async fn metadata<P: PirEngine + 'static>(State(state): State<Arc<AppState<P>>>) -> Response {
     let pir = state.live_pir.load();
     match pir.as_ref() {
         Some(pir_state) => Json(&pir_state.metadata).into_response(),
