@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="Delete snapshot and cached data (forces fresh sync)"
+#MISE alias="clean"
+set -e
+
+DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DATA_DIR="${DATA_DIR:-$DIR/data}"
+
+if [ -d "$DATA_DIR" ]; then
+    rm -rf "$DATA_DIR"
+    printf '\033[32mRemoved %s\033[0m\n' "$DATA_DIR"
+else
+    printf '\033[33mNothing to clean (%s does not exist)\033[0m\n' "$DATA_DIR"
+fi

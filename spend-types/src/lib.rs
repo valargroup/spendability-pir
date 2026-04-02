@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const TARGET_SIZE: usize = 1_000_000;
 pub const CONFIRMATION_DEPTH: u64 = 10;
+pub const NU5_MAINNET_ACTIVATION: u64 = 1_687_104;
 pub const NUM_BUCKETS: usize = 16_384; // 2^14
 pub const BUCKET_CAPACITY: usize = 112;
 pub const ENTRY_BYTES: usize = 32;

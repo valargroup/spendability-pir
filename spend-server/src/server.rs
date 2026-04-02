@@ -4,14 +4,18 @@ use crate::state::{AppState, PirState, ServerConfig};
 use axum::routing::{get, post};
 use axum::Router;
 use hashtable_pir::HashTableDb;
-use spend_types::{ChainEvent, PirEngine, ServerPhase, SpendabilityMetadata, NUM_BUCKETS};
+use spend_types::{
+    ChainEvent, PirEngine, ServerPhase, SpendabilityMetadata, NU5_MAINNET_ACTIVATION, NUM_BUCKETS,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const BACKFILL_BATCH: u64 = 50_000;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
     #[error("ingest error: {0}")]
-    Ingest(#[from] nf_ingest::ingest::IngestError),
+    Ingest(Box<nf_ingest::ingest::IngestError>),
     #[error("hashtable error: {0}")]
     HashTable(#[from] hashtable_pir::HashTableError),
     #[error("snapshot io error: {0}")]
@@ -20,6 +24,12 @@ pub enum ServerError {
     PirSetup(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<nf_ingest::ingest::IngestError> for ServerError {
+    fn from(e: nf_ingest::ingest::IngestError) -> Self {
+        ServerError::Ingest(Box::new(e))
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ServerError>;
@@ -76,6 +86,50 @@ fn rebuild_pir<P: PirEngine>(
     })
 }
 
+/// Sync a block range into the hashtable, reporting progress via `phase`.
+async fn sync_range(
+    lwd_urls: &[String],
+    from: u64,
+    to: u64,
+    hashtable: &mut HashTableDb,
+    phase: &arc_swap::ArcSwap<ServerPhase>,
+) -> Result<()> {
+    if from > to {
+        return Ok(());
+    }
+
+    let (tx, mut rx) = mpsc::channel::<ChainEvent>(1000);
+    let sync_handle = {
+        let mut client = nf_ingest::LwdClient::connect(lwd_urls)
+            .await
+            .map_err(nf_ingest::ingest::IngestError::from)?;
+        tokio::spawn(async move { nf_ingest::ingest::sync(&mut client, from, to, &tx).await })
+    };
+
+    while let Some(event) = rx.recv().await {
+        if let ChainEvent::NewBlock {
+            height,
+            hash,
+            nullifiers,
+            ..
+        } = event
+        {
+            hashtable.insert_block(height, hash, &nullifiers)?;
+
+            if height % 1000 == 0 {
+                phase.store(Arc::new(ServerPhase::Syncing {
+                    current_height: height,
+                    target_height: to,
+                }));
+                tracing::info!(height, nullifiers = hashtable.len(), "sync progress");
+            }
+        }
+    }
+
+    sync_handle.await.ok();
+    Ok(())
+}
+
 /// Main server entry point. Runs sync mode, transitions to follow mode, serves HTTP.
 pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -> Result<()> {
     let app_state = Arc::new(AppState::new(config.clone(), engine.clone()));
@@ -98,65 +152,85 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
         .map_err(nf_ingest::ingest::IngestError::from)?;
 
     // Load snapshot or fresh start
-    let (mut hashtable, sync_from) = match snapshot_io::load_snapshot(&config.data_dir).await {
+    let (mut hashtable, from_snapshot) = match snapshot_io::load_snapshot(&config.data_dir).await {
         Ok(ht) => {
             let resume = ht.latest_height().map(|h| h + 1).unwrap_or(0);
             tracing::info!(resume_height = resume, "loaded snapshot");
-            (ht, resume)
+            (ht, true)
         }
-        Err(_) => {
-            let blocks_needed = config.target_size as u64 / 20;
-            let start = tip_height.saturating_sub(blocks_needed);
-            tracing::info!(start_height = start, "fresh start");
-            (HashTableDb::new(), start)
-        }
+        Err(_) => (HashTableDb::new(), false),
     };
 
-    // Sync mode
-    if sync_from <= tip_height {
+    // Sync mode: catch up to tip, then backfill if we need more nullifiers
+    let forward_start = if from_snapshot {
+        hashtable
+            .latest_height()
+            .map(|h| h + 1)
+            .unwrap_or(tip_height)
+    } else {
+        let initial = tip_height.saturating_sub(BACKFILL_BATCH);
+        initial.max(NU5_MAINNET_ACTIVATION)
+    };
+
+    if forward_start <= tip_height {
         app_state.phase.store(Arc::new(ServerPhase::Syncing {
-            current_height: sync_from,
+            current_height: forward_start,
             target_height: tip_height,
         }));
-        tracing::info!(from = sync_from, to = tip_height, "entering sync mode");
-
-        let (tx, mut rx) = mpsc::channel::<ChainEvent>(1000);
-        let sync_handle = {
-            let mut sync_client = nf_ingest::LwdClient::connect(&config.lwd_urls)
-                .await
-                .map_err(nf_ingest::ingest::IngestError::from)?;
-            tokio::spawn(async move {
-                nf_ingest::ingest::sync(&mut sync_client, sync_from, tip_height, &tx).await
-            })
-        };
-
-        while let Some(event) = rx.recv().await {
-            if let ChainEvent::NewBlock {
-                height,
-                hash,
-                nullifiers,
-                ..
-            } = event
-            {
-                hashtable.insert_block(height, hash, &nullifiers)?;
-                hashtable.evict_to_target();
-
-                if height % 1000 == 0 {
-                    app_state.phase.store(Arc::new(ServerPhase::Syncing {
-                        current_height: height,
-                        target_height: tip_height,
-                    }));
-                    tracing::info!(height, "sync progress");
-                }
-            }
-        }
-
-        sync_handle.await.ok();
-
-        // Save snapshot after sync
-        snapshot_io::save_snapshot(&hashtable, &config.data_dir).await?;
-        tracing::info!("snapshot saved after sync");
+        tracing::info!(from = forward_start, to = tip_height, "entering sync mode");
+        sync_range(
+            &config.lwd_urls,
+            forward_start,
+            tip_height,
+            &mut hashtable,
+            &app_state.phase,
+        )
+        .await?;
     }
+
+    // Backfill earlier blocks until we reach target_size or NU5 activation
+    if !from_snapshot {
+        let mut backfill_end = forward_start.saturating_sub(1);
+        while hashtable.len() < config.target_size && backfill_end >= NU5_MAINNET_ACTIVATION {
+            let backfill_start = backfill_end
+                .saturating_sub(BACKFILL_BATCH - 1)
+                .max(NU5_MAINNET_ACTIVATION);
+            tracing::info!(
+                from = backfill_start,
+                to = backfill_end,
+                nullifiers = hashtable.len(),
+                target = config.target_size,
+                "backfilling earlier blocks",
+            );
+            sync_range(
+                &config.lwd_urls,
+                backfill_start,
+                backfill_end,
+                &mut hashtable,
+                &app_state.phase,
+            )
+            .await?;
+
+            if backfill_start == NU5_MAINNET_ACTIVATION {
+                break;
+            }
+            backfill_end = backfill_start.saturating_sub(1);
+        }
+        tracing::info!(
+            nullifiers = hashtable.len(),
+            blocks = hashtable.num_blocks(),
+            earliest = hashtable.earliest_height(),
+            latest = hashtable.latest_height(),
+            "sync complete",
+        );
+    }
+
+    // Save snapshot after sync
+    snapshot_io::save_snapshot(&hashtable, &config.data_dir).await?;
+    tracing::info!("snapshot saved after sync");
+
+    // Evict down to target now that we've filled up
+    hashtable.evict_to_target();
 
     // Build PIR once and start serving
     let pir_state = rebuild_pir(&*engine, &hashtable, &app_state.scenario)?;
@@ -253,50 +327,60 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
         .await
         .map_err(nf_ingest::ingest::IngestError::from)?;
 
-    let (mut hashtable, sync_from) = match snapshot_io::load_snapshot(&config.data_dir).await {
-        Ok(ht) => {
-            let resume = ht.latest_height().map(|h| h + 1).unwrap_or(0);
-            (ht, resume)
-        }
-        Err(_) => {
-            let blocks_needed = config.target_size as u64 / 20;
-            let start = tip_height.saturating_sub(blocks_needed);
-            (HashTableDb::new(), start)
-        }
+    let (mut hashtable, from_snapshot) = match snapshot_io::load_snapshot(&config.data_dir).await {
+        Ok(ht) => (ht, true),
+        Err(_) => (HashTableDb::new(), false),
     };
 
-    if sync_from <= tip_height {
+    let forward_start = if from_snapshot {
+        hashtable
+            .latest_height()
+            .map(|h| h + 1)
+            .unwrap_or(tip_height)
+    } else {
+        let initial = tip_height.saturating_sub(BACKFILL_BATCH);
+        initial.max(NU5_MAINNET_ACTIVATION)
+    };
+
+    if forward_start <= tip_height {
         app_state.phase.store(Arc::new(ServerPhase::Syncing {
-            current_height: sync_from,
+            current_height: forward_start,
             target_height: tip_height,
         }));
-
-        let (tx, mut rx) = mpsc::channel::<ChainEvent>(1000);
-        let sync_handle = {
-            let mut sync_client = nf_ingest::LwdClient::connect(&config.lwd_urls)
-                .await
-                .map_err(nf_ingest::ingest::IngestError::from)?;
-            tokio::spawn(async move {
-                nf_ingest::ingest::sync(&mut sync_client, sync_from, tip_height, &tx).await
-            })
-        };
-
-        while let Some(event) = rx.recv().await {
-            if let ChainEvent::NewBlock {
-                height,
-                hash,
-                nullifiers,
-                ..
-            } = event
-            {
-                hashtable.insert_block(height, hash, &nullifiers)?;
-                hashtable.evict_to_target();
-            }
-        }
-        sync_handle.await.ok();
-
-        snapshot_io::save_snapshot(&hashtable, &config.data_dir).await?;
+        sync_range(
+            &config.lwd_urls,
+            forward_start,
+            tip_height,
+            &mut hashtable,
+            &app_state.phase,
+        )
+        .await?;
     }
+
+    if !from_snapshot {
+        let mut backfill_end = forward_start.saturating_sub(1);
+        while hashtable.len() < config.target_size && backfill_end >= NU5_MAINNET_ACTIVATION {
+            let backfill_start = backfill_end
+                .saturating_sub(BACKFILL_BATCH - 1)
+                .max(NU5_MAINNET_ACTIVATION);
+            sync_range(
+                &config.lwd_urls,
+                backfill_start,
+                backfill_end,
+                &mut hashtable,
+                &app_state.phase,
+            )
+            .await?;
+
+            if backfill_start == NU5_MAINNET_ACTIVATION {
+                break;
+            }
+            backfill_end = backfill_start.saturating_sub(1);
+        }
+    }
+
+    hashtable.evict_to_target();
+    snapshot_io::save_snapshot(&hashtable, &config.data_dir).await?;
 
     let pir_state = rebuild_pir(&*engine, &hashtable, &app_state.scenario)?;
     app_state.live_pir.store(Arc::new(Some(pir_state)));
