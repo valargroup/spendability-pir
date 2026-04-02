@@ -28,9 +28,7 @@ impl LwdClient {
         for endpoint in endpoints {
             let result = if endpoint.starts_with("https://") {
                 let tls = ClientTlsConfig::new().with_native_roots();
-                let ep = Endpoint::from_shared(endpoint.clone())
-                    .map_err(|e| tonic::transport::Error::from(e))?
-                    .tls_config(tls)?;
+                let ep = Endpoint::from_shared(endpoint.clone())?.tls_config(tls)?;
                 CompactTxStreamerClient::connect(ep).await
             } else {
                 CompactTxStreamerClient::connect(endpoint.clone()).await
