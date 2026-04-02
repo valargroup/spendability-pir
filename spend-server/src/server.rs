@@ -40,10 +40,17 @@ fn rebuild_pir<P: PirEngine>(
     hashtable: &HashTableDb,
     scenario: &spend_types::YpirScenario,
 ) -> std::result::Result<PirState<P>, ServerError> {
+    let total_start = std::time::Instant::now();
+
+    let serialize_start = std::time::Instant::now();
     let db_bytes = hashtable.to_pir_bytes();
+    let serialize_ms = serialize_start.elapsed().as_millis();
+
+    let setup_start = std::time::Instant::now();
     let engine_state = engine
         .setup(&db_bytes, scenario)
         .map_err(|e| ServerError::PirSetup(e.to_string()))?;
+    let setup_ms = setup_start.elapsed().as_millis();
 
     let metadata = SpendabilityMetadata {
         earliest_height: hashtable.earliest_height().unwrap_or(0),
@@ -52,6 +59,16 @@ fn rebuild_pir<P: PirEngine>(
         num_buckets: NUM_BUCKETS as u64,
         phase: ServerPhase::Serving,
     };
+
+    tracing::info!(
+        total_ms = total_start.elapsed().as_millis() as u64,
+        serialize_ms = serialize_ms as u64,
+        setup_ms = setup_ms as u64,
+        db_bytes = db_bytes.len(),
+        nullifiers = metadata.num_nullifiers,
+        height_range = format_args!("{}..{}", metadata.earliest_height, metadata.latest_height),
+        "pir rebuild complete",
+    );
 
     Ok(PirState {
         engine_state,
