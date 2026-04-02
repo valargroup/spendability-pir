@@ -65,8 +65,8 @@ mod tests {
         let mut db = hashtable_pir::HashTableDb::new();
         let mut nf = [0u8; 32];
         nf[0..4].copy_from_slice(&42u32.to_le_bytes());
-        for i in 4..32 {
-            nf[i] = i as u8;
+        for (i, byte) in nf.iter_mut().enumerate().skip(4) {
+            *byte = i as u8;
         }
         db.insert_block(1, [1u8; 32], &[nf]).unwrap();
 

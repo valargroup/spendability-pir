@@ -11,11 +11,17 @@ pub struct MockState {
     pub blocks: Arc<Mutex<Vec<CompactBlock>>>,
 }
 
-impl MockState {
-    pub fn new() -> Self {
+impl Default for MockState {
+    fn default() -> Self {
         Self {
             blocks: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+}
+
+impl MockState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn set_blocks(&self, blocks: Vec<CompactBlock>) {
@@ -286,8 +292,8 @@ fn hash_for(n: u8) -> [u8; 32] {
 fn make_nf(seed: u32) -> [u8; 32] {
     let mut nf = [0u8; 32];
     nf[0..4].copy_from_slice(&seed.to_le_bytes());
-    for i in 4..32 {
-        nf[i] = ((seed >> ((i % 4) * 8)) as u8).wrapping_add(i as u8);
+    for (i, byte) in nf.iter_mut().enumerate().skip(4) {
+        *byte = ((seed >> ((i % 4) * 8)) as u8).wrapping_add(i as u8);
     }
     nf
 }

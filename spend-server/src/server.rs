@@ -203,9 +203,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     if !from_snapshot {
         let mut backfill_end = forward_start.saturating_sub(1);
         while hashtable.len() < config.target_size && backfill_end >= floor {
-            let backfill_start = backfill_end
-                .saturating_sub(BACKFILL_BATCH - 1)
-                .max(floor);
+            let backfill_start = backfill_end.saturating_sub(BACKFILL_BATCH - 1).max(floor);
             tracing::info!(
                 from = backfill_start,
                 to = backfill_end,
@@ -372,9 +370,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
     if !from_snapshot {
         let mut backfill_end = forward_start.saturating_sub(1);
         while hashtable.len() < config.target_size && backfill_end >= floor {
-            let backfill_start = backfill_end
-                .saturating_sub(BACKFILL_BATCH - 1)
-                .max(floor);
+            let backfill_start = backfill_end.saturating_sub(BACKFILL_BATCH - 1).max(floor);
             sync_range(
                 &config.lwd_urls,
                 backfill_start,
