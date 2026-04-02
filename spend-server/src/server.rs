@@ -181,7 +181,7 @@ pub async fn run<P: PirEngine + 'static>(
                 hashtable.insert_block(height, hash, &nullifiers)?;
                 hashtable.evict_to_target();
                 blocks_since_snapshot += 1;
-                tracing::debug!(height, nfs = nullifiers.len(), "new block");
+                tracing::info!(height, nfs = nullifiers.len(), "new block");
             }
             ChainEvent::Reorg {
                 orphaned,
