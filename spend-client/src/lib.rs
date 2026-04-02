@@ -147,6 +147,54 @@ impl SpendClient {
     }
 }
 
+/// Blocking wrapper around `SpendClient` for use from synchronous FFI contexts.
+/// Owns a single-threaded tokio runtime internally.
+pub struct SpendClientBlocking {
+    rt: tokio::runtime::Runtime,
+    client: SpendClient,
+}
+
+impl SpendClientBlocking {
+    pub fn connect(url: &str) -> Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| SpendClientError::QueryFailed(e.to_string()))?;
+        let client = rt.block_on(SpendClient::connect(url))?;
+        Ok(Self { rt, client })
+    }
+
+    /// Check a batch of nullifiers against the PIR database.
+    /// Returns a `Vec<bool>` parallel to the input: `true` = spent.
+    /// Calls `progress` after each query with fraction complete (0.0..=1.0).
+    pub fn check_nullifiers(
+        &self,
+        nullifiers: &[[u8; 32]],
+        progress: impl Fn(f64),
+    ) -> Result<Vec<bool>> {
+        let total = nullifiers.len();
+        let mut results = Vec::with_capacity(total);
+        for (i, nf) in nullifiers.iter().enumerate() {
+            let spent = self.rt.block_on(self.client.is_spent(nf))?;
+            results.push(spent);
+            progress((i + 1) as f64 / total as f64);
+        }
+        Ok(results)
+    }
+
+    pub fn metadata(&self) -> &SpendabilityMetadata {
+        self.client.metadata()
+    }
+
+    pub fn earliest_height(&self) -> u64 {
+        self.client.earliest_height()
+    }
+
+    pub fn latest_height(&self) -> u64 {
+        self.client.latest_height()
+    }
+}
+
 /// Scan the decoded bucket bytes for a nullifier match.
 pub fn scan_bucket_for_nf(decoded_row: &[u8], nf: &[u8; 32]) -> bool {
     let bucket_data = if decoded_row.len() >= BUCKET_BYTES {
