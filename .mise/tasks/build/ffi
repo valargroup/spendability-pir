@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#MISE description="Pre-build zcash-swift-wallet-sdk Rust FFI (xcframework)"
+#MISE alias="build:ffi"
+#MISE quiet=true
+set -e
+
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+SDK_DIR="$DIR/zcash-swift-wallet-sdk"
+TARGET="${1:-ios-sim}"
+
+# ── Use stable Rust for the SDK build ───────────────────────────
+# The SDK (libzcashlc) requires a recent stable Rust (>=1.90),
+# while this repo's own crates use nightly via rust-toolchain.toml.
+if [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+fi
+export RUSTUP_TOOLCHAIN=stable
+
+# ── Validate SDK symlink ────────────────────────────────────────
+if [ ! -d "$SDK_DIR/.git" ] && [ ! -d "$SDK_DIR/rust" ]; then
+    printf '\033[31mError: zcash-swift-wallet-sdk not found at %s\033[0m\n' "$SDK_DIR"
+    printf 'Create a symlink:  ln -s /path/to/zcash-swift-wallet-sdk %s\n' "$SDK_DIR"
+    exit 1
+fi
+
+# ── Ensure LocalPackages exists ─────────────────────────────────
+if [ ! -d "$SDK_DIR/LocalPackages" ]; then
+    printf '\033[36mInitializing LocalPackages (first time only)...\033[0m\n'
+    mkdir -p "$SDK_DIR/LocalPackages/libzcashlc.xcframework"
+    cat > "$SDK_DIR/LocalPackages/Package.swift" << 'EOF'
+// swift-tools-version:5.6
+import PackageDescription
+
+let package = Package(
+    name: "libzcashlc",
+    products: [
+        .library(name: "libzcashlc", targets: ["libzcashlc"])
+    ],
+    targets: [
+        .binaryTarget(
+            name: "libzcashlc",
+            path: "libzcashlc.xcframework"
+        )
+    ]
+)
+EOF
+fi
+
+# ── Freshness check ────────────────────────────────────────────
+# Determine the built .a path based on target (only check default ios-sim for now)
+case "$TARGET" in
+    ios-sim)    RUST_TRIPLE="aarch64-apple-ios-sim" ;;
+    ios-device) RUST_TRIPLE="aarch64-apple-ios" ;;
+    macos)      RUST_TRIPLE="aarch64-apple-darwin" ;;
+    *)          RUST_TRIPLE="" ;;
+esac
+
+BUILT_LIB="$SDK_DIR/target/$RUST_TRIPLE/release/libzcashlc.a"
+needs_build=true
+
+if [ -n "$RUST_TRIPLE" ] && [ -f "$BUILT_LIB" ]; then
+    newer_src=$(find \
+        "$SDK_DIR/rust/src" \
+        "$DIR/spend-client/src" \
+        "$DIR/spend-types/src" \
+        -name '*.rs' -newer "$BUILT_LIB" 2>/dev/null | head -1)
+    if [ -z "$newer_src" ]; then
+        needs_build=false
+    fi
+fi
+
+if [ "$needs_build" = true ]; then
+    printf '\033[36mBuilding Rust FFI for %s...\033[0m\n' "$TARGET"
+    "$SDK_DIR/Scripts/rebuild-local-ffi.sh" "$TARGET"
+    printf '\033[32mFFI build complete.\033[0m\n'
+else
+    printf '\033[32mxcframework is up to date, skipping Rust build.\033[0m\n'
+fi

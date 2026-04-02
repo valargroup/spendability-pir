@@ -74,6 +74,32 @@ During sync, `GET /health` reports progress and `POST /query` returns 503.
 | `/params` | GET | `YpirScenario` JSON (always available) |
 | `/query` | POST | YPIR query bytes in, encrypted response out (503 during sync) |
 
+## iOS Development
+
+Mise tasks are provided for building the Rust FFI and launching the iOS wallet app. These require symlinks to sibling repos at the project root:
+
+```bash
+ln -s /path/to/zcash-swift-wallet-sdk zcash-swift-wallet-sdk
+ln -s /path/to/zodl-ios zodl-ios
+```
+
+### Pre-build Rust bindings (XCFramework)
+
+```bash
+mise run build:ffi              # iOS Simulator (default)
+mise run build:ffi ios-device   # iOS Device
+```
+
+This compiles `libzcashlc` (which includes `spend-client` and `spend-types`) into an XCFramework inside `zcash-swift-wallet-sdk/LocalPackages/`. Skips the build if sources haven't changed.
+
+### Launch secant-mainnet in Xcode
+
+```bash
+mise run start:ios
+```
+
+Builds the FFI if needed, then opens `zodl-ios/secant.xcodeproj` in Xcode. Select the `secant-mainnet` scheme and press Cmd+R to run on the simulator. Re-run `start:ios` after changing Rust code.
+
 ## Testing
 
 ```bash

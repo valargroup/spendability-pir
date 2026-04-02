@@ -1,0 +1,2 @@
+# Rust is managed by rust-toolchain.toml (for this repo's crates)
+# and RUSTUP_TOOLCHAIN=stable in build:ffi (for the SDK's xcframework).

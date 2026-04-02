@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#MISE description="Build xcframework + open secant-mainnet in Xcode"
+#MISE alias="start:ios"
+#MISE depends=["build:ffi"]
+#MISE quiet=true
+set -e
+
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+SDK_DIR="$DIR/zcash-swift-wallet-sdk"
+IOS_DIR="$DIR/zodl-ios"
+PROJECT="$IOS_DIR/secant.xcodeproj"
+
+# ── Validate symlinks ───────────────────────────────────────────
+if [ ! -d "$SDK_DIR/.git" ] && [ ! -d "$SDK_DIR/rust" ]; then
+    printf '\033[31mError: zcash-swift-wallet-sdk not found at %s\033[0m\n' "$SDK_DIR"
+    printf 'Create a symlink:  ln -s /path/to/zcash-swift-wallet-sdk %s\n' "$SDK_DIR"
+    exit 1
+fi
+
+if [ ! -d "$IOS_DIR/.git" ] && [ ! -d "$IOS_DIR/secant.xcodeproj" ]; then
+    printf '\033[31mError: zodl-ios not found at %s\033[0m\n' "$IOS_DIR"
+    printf 'Create a symlink:  ln -s /path/to/zodl-ios %s\n' "$IOS_DIR"
+    exit 1
+fi
+
+# ── Open Xcode ──────────────────────────────────────────────────
+if [ -d "$PROJECT" ]; then
+    printf '\033[32mOpening secant-mainnet in Xcode...\033[0m\n'
+    open "$PROJECT"
+    echo ""
+    echo "Xcode is ready. Select the secant-mainnet scheme, then Cmd+R to build and run."
+    echo "After Rust changes, re-run: mise run start:ios"
+else
+    printf '\033[33mXcode project not found at %s\033[0m\n' "$PROJECT"
+    exit 1
+fi
