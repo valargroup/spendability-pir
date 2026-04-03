@@ -99,6 +99,10 @@ jobs:
 
             sudo mkdir -p /etc/caddy
             sed "s/DEPLOY_DOMAIN/$DEPLOY_DOMAIN/g" /opt/spend-server/Caddyfile | sudo tee /etc/caddy/Caddyfile > /dev/null
-            sudo systemctl reload caddy || sudo systemctl restart caddy
+            sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            sudo systemctl restart caddy || {
+              sudo journalctl -u caddy --no-pager -n 30
+              exit 1
+            }
         env:
           DEPLOY_DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
