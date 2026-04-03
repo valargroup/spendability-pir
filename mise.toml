@@ -1,2 +1,20 @@
 # Rust is managed by rust-toolchain.toml (for this repo's crates)
 # and RUSTUP_TOOLCHAIN=stable in build:ffi (for the SDK's xcframework).
+
+[tasks.record]
+description = "Record the booted iOS Simulator and produce a padded 4K video"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+RAW="$HOME/Desktop/raw_recording.mp4"
+OUTPUT="$HOME/Desktop/iphone17pro_recording.mp4"
+
+echo "Recording simulator... Press Ctrl+C to stop."
+xcrun simctl io booted recordVideo --codec=h264 --mask=black --force "$RAW"
+
+echo "Adding black padding to 4K (3840x2160)..."
+ffmpeg -i "$RAW" -vf "scale=-2:2160,pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=000000" -y "$OUTPUT"
+
+echo "Done! Output: $OUTPUT"
+"""
