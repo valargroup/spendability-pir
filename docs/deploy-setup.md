@@ -82,6 +82,7 @@ In the repo: **Settings -> Secrets and variables -> Actions**, add:
 | `DEPLOY_HOST` | Remote hostname or IP (e.g. `pir.example.com` or `192.0.2.10`). |
 | `DEPLOY_USER` | SSH user on that host (e.g. `deploy` or `ubuntu`). |
 | `SSH_PASSWORD` | SSH password for that user. |
+| `DEPLOY_DOMAIN` | Public domain for the server (e.g. `pir.example.com`). Used in the Caddyfile for automatic TLS. |
 
 ### One-time setup on the remote host
 
@@ -96,7 +97,7 @@ The `spend-server` binary is an all-in-one server that syncs from lightwalletd a
 
 - **lightwalletd endpoint**: Configured via `--lwd-url` (default in the service file: `https://zec.rocks:443`).
 - **Data directory**: For snapshots and hint cache, configured via `--data-dir`.
-- **Port**: Configurable via `--listen` (default `0.0.0.0:8080`).
+- **Port**: Configurable via `--listen` (default `127.0.0.1:8080`, behind Caddy).
 
 A systemd unit file is provided at `docs/spend-server.service`. Copy to `/etc/systemd/system/`:
 
@@ -106,6 +107,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable spend-server
 sudo systemctl start spend-server
 ```
+
+**Caddy reverse proxy**
+
+Caddy handles TLS termination and reverse-proxies HTTPS traffic to `spend-server` on `localhost:8080`. Install Caddy once on the remote host:
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install caddy
+```
+
+Caddy is enabled on boot by default. The CI pipeline deploys the Caddyfile (with the domain from the `DEPLOY_DOMAIN` secret) to `/etc/caddy/Caddyfile` and reloads the service on every deploy. Caddy automatically provisions and renews TLS certificates via Let's Encrypt.
+
+Ensure the server's DNS A record points to this host and that ports 80 and 443 are open (Caddy needs port 80 for the ACME HTTP challenge).
 
 ### Changing deploy path or restart command
 

@@ -1,5 +1,5 @@
 # Deploy spend-server to a remote host on every push to main.
-# Requires repository secrets: DEPLOY_HOST, DEPLOY_USER, SSH_PASSWORD.
+# Requires repository secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_DOMAIN, SSH_PASSWORD.
 # See docs/deploy-setup.md for one-time remote setup.
 
 name: Deploy spend-server
@@ -54,6 +54,7 @@ jobs:
           path: |
             target/release/spend-server
             docs/spend-server.service
+            docs/Caddyfile
 
   deploy:
     name: Deploy to remote
@@ -69,8 +70,9 @@ jobs:
         run: |
           cp target/release/spend-server /tmp/spend-server
           cp docs/spend-server.service /tmp/spend-server.service
+          cp docs/Caddyfile /tmp/Caddyfile
           rm -rf target docs
-          mv /tmp/spend-server /tmp/spend-server.service .
+          mv /tmp/spend-server /tmp/spend-server.service /tmp/Caddyfile .
 
       - name: Deploy via SSH
         uses: appleboy/scp-action@v0.1.7
@@ -78,7 +80,7 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.SSH_PASSWORD }}
-          source: "spend-server,spend-server.service"
+          source: "spend-server,spend-server.service,Caddyfile"
           target: ${{ env.DEPLOY_PATH }}
 
       - name: Install config and restart services
@@ -87,9 +89,16 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.SSH_PASSWORD }}
+          envs: DEPLOY_DOMAIN
           script: |
             sudo chmod +x /opt/spend-server/spend-server
             sudo cp /opt/spend-server/spend-server.service /etc/systemd/system/spend-server.service
             sudo systemctl daemon-reload
             sudo systemctl enable spend-server
             sudo systemctl restart spend-server
+
+            sudo mkdir -p /etc/caddy
+            sed "s/DEPLOY_DOMAIN/$DEPLOY_DOMAIN/g" /opt/spend-server/Caddyfile | sudo tee /etc/caddy/Caddyfile > /dev/null
+            sudo systemctl reload caddy || sudo systemctl restart caddy
+        env:
+          DEPLOY_DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
