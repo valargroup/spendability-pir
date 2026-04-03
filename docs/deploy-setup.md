@@ -79,10 +79,9 @@ In the repo: **Settings -> Secrets and variables -> Actions**, add:
 
 | Secret | Description |
 |--------|-------------|
-| `DEPLOY_HOST` | Remote hostname or IP (e.g. `pir.example.com` or `192.0.2.10`). |
+| `DEPLOY_HOST` | Remote hostname or IP (e.g. `pir.example.com` or `164.92.137.124`). If an IP, Caddy is configured with a `sslip.io` domain (e.g. `164-92-137-124.sslip.io`) for automatic TLS. If a domain name, it's used as-is. |
 | `DEPLOY_USER` | SSH user on that host (e.g. `deploy` or `ubuntu`). |
 | `SSH_PASSWORD` | SSH password for that user. |
-| `DEPLOY_DOMAIN` | Public domain for the server (e.g. `pir.example.com`). Used in the Caddyfile for automatic TLS. |
 
 ### One-time setup on the remote host
 
