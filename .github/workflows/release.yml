@@ -2,8 +2,11 @@
 #
 # Release assets:
 #   spend-server-linux-amd64, spend-server-linux-arm64,
-#   spend-server-darwin-amd64, spend-server-darwin-arm64,
+#   spend-server-darwin-arm64,
 #   spend-server.service
+#
+# Note: darwin-amd64 is not supported because spend-server requires the ypir
+# feature (which builds C++ with -march=native) and cannot be cross-compiled.
 
 name: Release
 
@@ -28,10 +31,6 @@ jobs:
             platform: linux-arm64
           - os: macos-latest
             platform: darwin-arm64
-          - os: macos-latest
-            platform: darwin-amd64
-            cross: true
-            rust_target: x86_64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +39,6 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2025-03-15
-          targets: ${{ matrix.rust_target || '' }}
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -59,17 +57,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.platform }}-spend-server-
 
       - name: Build release binary
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            # Cross-compile without ypir feature: YPIR's C++ build uses
-            # -march=native which fails when host and target arch differ.
-            cargo build --release -p spend-server \
-              --target ${{ matrix.rust_target }}
-            mkdir -p target/release
-            cp target/${{ matrix.rust_target }}/release/spend-server target/release/
-          else
-            cargo build --release -p spend-server --features ypir
-          fi
+        run: cargo build --release -p spend-server --features ypir
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -92,7 +80,7 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          for PLATFORM in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+          for PLATFORM in linux-amd64 linux-arm64 darwin-arm64; do
             cp "spend-server-${PLATFORM}/spend-server" "spend-server-${PLATFORM}.tmp"
             rm -rf "spend-server-${PLATFORM}"
             mv "spend-server-${PLATFORM}.tmp" "spend-server-${PLATFORM}"
@@ -107,7 +95,6 @@ jobs:
           files: |
             spend-server-linux-amd64
             spend-server-linux-arm64
-            spend-server-darwin-amd64
             spend-server-darwin-arm64
             spend-server.service
 
@@ -139,7 +126,7 @@ jobs:
           bucket_location = fra1
           use_https = True
           EOF
-          for PLATFORM in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+          for PLATFORM in linux-amd64 linux-arm64 darwin-arm64; do
             BINARY="spend-server-${PLATFORM}/spend-server"
             if [ -f "$BINARY" ]; then
               s3cmd -c /tmp/do-spaces.s3cfg put "$BINARY" \

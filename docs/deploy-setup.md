@@ -29,21 +29,19 @@ Grab the latest release from GitHub:
 
 ```bash
 # Pick the asset for your platform
-PLATFORM="linux-amd64"   # or: linux-arm64, darwin-amd64, darwin-arm64
-VERSION=$(curl -s https://api.github.com/repos/AgitoReiworworking/sync-nullifier-pir/releases/latest | grep tag_name | cut -d'"' -f4)
+PLATFORM="linux-amd64"   # or: linux-arm64, darwin-arm64
+VERSION=$(curl -s https://api.github.com/repos/valargroup/sync-nullifier-pir/releases/latest | grep tag_name | cut -d'"' -f4)
 
 sudo mkdir -p /opt/spend-server
 cd /opt/spend-server
 
 # Download the binary and systemd unit
-curl -fLO "https://github.com/AgitoReiworworking/sync-nullifier-pir/releases/download/${VERSION}/spend-server-${PLATFORM}"
-curl -fLO "https://github.com/AgitoReiworworking/sync-nullifier-pir/releases/download/${VERSION}/spend-server.service"
+curl -fLO "https://github.com/valargroup/sync-nullifier-pir/releases/download/${VERSION}/spend-server-${PLATFORM}"
+curl -fLO "https://github.com/valargroup/sync-nullifier-pir/releases/download/${VERSION}/spend-server.service"
 
 sudo mv "spend-server-${PLATFORM}" spend-server
 sudo chmod +x spend-server
 ```
-
-> **Note:** Replace the repository URL above with the actual GitHub repository path.
 
 ### 2. Create the data directory
 
@@ -83,7 +81,7 @@ In the repo: **Settings -> Secrets and variables -> Actions**, add:
 |--------|-------------|
 | `DEPLOY_HOST` | Remote hostname or IP (e.g. `pir.example.com` or `192.0.2.10`). |
 | `DEPLOY_USER` | SSH user on that host (e.g. `deploy` or `ubuntu`). |
-| `SSH_KEY` | SSH private key for that user. |
+| `SSH_PASSWORD` | SSH password for that user. |
 
 ### One-time setup on the remote host
 
