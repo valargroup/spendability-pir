@@ -31,13 +31,13 @@ The system spans four repositories and three runtime environments:
 │       │                                                                 │
 │  spendability.rs (FFI)                                                  │
 │       │  ┌──────────────────────────────────────────┐                   │
-│       ├──┤  query_unspent_orchard_notes (read)       │                  │
+│       ├──┤  get_unspent_orchard_notes_for_pir (read)  │                  │
 │       │  └──────────────────────────────────────────┘                   │
 │       │  ┌──────────────────────────────────────────┐                   │
 │       ├──┤  insert_pir_spent_note (write-back)       │                  │
 │       │  └──────────────────────────────────────────┘                   │
 │       │  ┌──────────────────────────────────────────┐                   │
-│       └──┤  query_pir_pending_spends (reconciliation)│                  │
+│       └──┤  get_pir_pending_spends (reconciliation)  │                  │
 │          └──────────────┬───────────────────────────┘                   │
 │                         │                                               │
 │  zcash_client_sqlite    │                                               │
@@ -78,7 +78,7 @@ The system spans four repositories and three runtime environments:
 | Repository | Role | PIR-relevant code |
 |---|---|---|
 | `sync-nullifier-pir` | PIR server + client library | `spend-server/`, `spend-client/`, `spend-types/`, `hashtable-pir/`, `nf-ingest/` |
-| `zcash-swift-wallet-sdk` | Rust FFI layer + Swift SDK for iOS | `rust/src/spendability.rs` (FFI functions, DB queries, PIR client calls, pending-spend reconciliation), `SDKSynchronizer.swift` (PIR entry point, sets `pirCompleted`), `ZcashRustBackend.swift` (Orchard spendability preserved when `pirCompleted`), `SDKFlags.swift` (`pirCompleted` flag lifecycle), `SpendabilityTypes.swift` (`PIRPendingSpends` / `PIRPendingNote` types) |
+| `zcash-swift-wallet-sdk` | Rust FFI layer + Swift SDK for iOS | `rust/src/spendability.rs` (FFI functions, DB queries, PIR client calls, pending-spend reconciliation), `SpendabilityBackend.swift` (Swift-side FFI bridge to `zcashlc_*` functions), `SDKSynchronizer.swift` (PIR entry point, sets `pirCompleted`), `ZcashRustBackend.swift` (Orchard spendability preserved when `pirCompleted`), `SDKFlags.swift` (`pirCompleted` flag lifecycle), `SpendabilityTypes.swift` (`PIRPendingSpends` / `PIRPendingNote` types) |
 | `zcash_client_sqlite` | Wallet database crate (forked from upstream) | `src/wallet/common.rs` (`spent_notes_clause`, `unscanned_tip_exists` bypass), `src/wallet/db.rs` (table constants), `src/wallet/init/migrations/` (schema), `src/wallet.rs` (`truncate_to_height`, `get_wallet_summary`, `is_any_spendable` bypass) |
 | `zodl-ios` | iOS app (TCA architecture) | `RootInitialization.swift` (PIR trigger), `RootTransactions.swift` (PIR placeholder reconciliation), `WalletBalancesStore.swift` (balance display), `PIRDebugStore.swift` (diagnostics) |
 
@@ -88,7 +88,7 @@ The system spans four repositories and three runtime environments:
 
 `nf-ingest` connects to `lightwalletd` via gRPC, parses compact blocks, extracts Orchard nullifiers, and feeds them as `ChainEvent`s into `HashTableDb` (a bucketed hash table). The hash table maps each 32-byte nullifier to a bucket via `hash_to_bucket(nf)` (first 4 bytes mod 16,384). The server handles reorgs by rolling back orphaned blocks.
 
-`spend-server` periodically rebuilds the YPIR database from the hash table (~3s) and swaps it in atomically via `ArcSwap`. Clients query via `POST /query` with an encrypted YPIR query for a single bucket.
+`spend-server` rebuilds the YPIR database from the hash table after each chain event — new block or reorg — (~3s per rebuild) and swaps it in atomically via `ArcSwap`. Clients query via `POST /query` with an encrypted YPIR query for a single bucket.
 
 ### 2. Client-Side: PIR Query
 
@@ -107,7 +107,7 @@ The server learns which bucket was queried but not which entry within it, preser
 This C FFI function in `spendability.rs` is the bridge between the wallet DB and the PIR client:
 
 1. **Open** the wallet SQLite DB (read-write)
-2. **Read** unspent Orchard nullifiers via `query_unspent_orchard_notes` (excludes notes already in `orchard_received_note_spends` or `pir_spent_notes`)
+2. **Read** unspent Orchard nullifiers via `get_unspent_orchard_notes_for_pir` (excludes notes already in `orchard_received_note_spends` or `pir_spent_notes`)
 3. **Connect** to the PIR server via `SpendClientBlocking::connect`
 4. **Check** each nullifier via `check_nullifiers` (reports progress via callback)
 5. **Write back** spent results into `pir_spent_notes` via `insert_pir_spent_note` (atomic conditional insert with retry)
@@ -116,8 +116,8 @@ This C FFI function in `spendability.rs` is the bridge between the wallet DB and
 ### 4. Swift Layer: Trigger and Display
 
 **Trigger** (`RootInitialization.swift`):
-- On app startup, fires `checkSpendabilityPIR` unconditionally
-- During sync, refires PIR on `.foundTransactions` events (debounced 5s, cancel-in-flight)
+- On app startup (foreground only, skipped for background tasks), fires `checkSpendabilityPIR`
+- During sync, refires PIR on `.foundTransactions` and `.syncReachedUpToDate` events (debounced 5s)
 - Stores the diagnostic result in `pirSpendabilityResult` shared state
 
 **Spendability flag** (`SDKSynchronizer.swift` / `SDKFlags.swift`):
@@ -291,7 +291,7 @@ getWalletSummary (Swift)      chainTipUpdated gates    Orchard: preserved if
 - `spent_notes_clause` already excludes PIR-marked spent notes from all balance and selection queries.
 - Notes NOT in `pir_spent_notes` have been confirmed unspent by PIR's on-chain nullifier check.
 - If PIR hasn't run (server unreachable), `pir_spent_notes` is empty. The user could attempt to spend a note that was actually spent in unscanned blocks; the transaction would fail at broadcast (nullifier already on-chain). No funds are lost.
-- Newly discovered notes (found after PIR's last run) are not yet validated. The `foundTransactionsDuringSync` handler triggers a debounced PIR re-check within 5 seconds, limiting the exposure window.
+- Newly discovered notes (found after PIR's last run) are not yet validated. The `foundTransactions` / `syncReachedUpToDate` handler triggers a debounced PIR re-check within 5 seconds, limiting the exposure window.
 
 ## Feature Flag Strategy
 
@@ -326,7 +326,7 @@ SQLite (even in WAL mode) allows only one writer at a time. The PIR connection u
 
 PIR and scanning can operate on the same note concurrently. Two layers prevent inconsistency:
 
-1. **Read-time exclusion:** `query_unspent_orchard_notes` excludes notes already in `orchard_received_note_spends` or `pir_spent_notes`. If scanning marks a note before PIR reads, PIR never sees it.
+1. **Read-time exclusion:** `get_unspent_orchard_notes_for_pir` excludes notes already in `orchard_received_note_spends` or `pir_spent_notes`. If scanning marks a note before PIR reads, PIR never sees it.
 
 2. **Atomic conditional insert:** The PIR INSERT uses `NOT EXISTS` guards against both `orchard_received_note_spends` and `pir_spent_notes`. SQLite's write serialization ensures these checks and the INSERT execute atomically.
 
