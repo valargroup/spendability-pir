@@ -220,7 +220,11 @@ impl CommitmentTreeDb {
         let new_len = self.leaves.len().saturating_sub(to_remove);
         self.leaves.truncate(new_len);
 
-        let frontier_slot = if new_len == 0 { 0 } else { (new_len - 1) / SUBSHARD_LEAVES };
+        let frontier_slot = if new_len == 0 {
+            0
+        } else {
+            (new_len - 1) / SUBSHARD_LEAVES
+        };
         for slot in frontier_slot..L0_DB_ROWS {
             self.ss_root_cache[slot] = None;
         }
@@ -866,7 +870,10 @@ mod tests {
         let (_, bd1) = tree.build_pir_db_and_broadcast(100);
         assert!(tree.ss_root_cache[0].is_some());
         tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
-        assert!(tree.ss_root_cache[0].is_none(), "slot 0 must be invalidated");
+        assert!(
+            tree.ss_root_cache[0].is_none(),
+            "slot 0 must be invalidated"
+        );
         let (_, bd2) = tree.build_pir_db_and_broadcast(101);
         assert_ne!(bd1.cap.shard_roots[0], bd2.cap.shard_roots[0]);
     }
@@ -879,7 +886,10 @@ mod tests {
         tree.build_pir_db_and_broadcast(101);
         assert!(tree.ss_root_cache[0].is_some());
         tree.rollback_to(100);
-        assert!(tree.ss_root_cache[0].is_none(), "cache must be invalidated on rollback");
+        assert!(
+            tree.ss_root_cache[0].is_none(),
+            "cache must be invalidated on rollback"
+        );
         let (_, bd) = tree.build_pir_db_and_broadcast(100);
         assert_eq!(bd.cap.shard_roots.len(), 1);
     }
@@ -897,6 +907,9 @@ mod tests {
         tree.append_commitments(102, [3u8; 32], &[make_leaf(0xFF)]);
         assert!(tree.ss_root_cache[0].is_some(), "slot 0 must stay cached");
         assert!(tree.ss_root_cache[1].is_some(), "slot 1 must stay cached");
-        assert!(tree.ss_root_cache[2].is_none(), "slot 2 must be invalidated");
+        assert!(
+            tree.ss_root_cache[2].is_none(),
+            "slot 2 must be invalidated"
+        );
     }
 }

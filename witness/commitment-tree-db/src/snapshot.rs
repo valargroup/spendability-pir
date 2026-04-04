@@ -457,7 +457,10 @@ mod tests {
         let snap = tree.to_snapshot();
         let restored = CommitmentTreeDb::from_snapshot(&snap).unwrap();
 
-        assert!(restored.ss_root_cache()[0].is_some(), "cache must survive snapshot roundtrip");
+        assert!(
+            restored.ss_root_cache()[0].is_some(),
+            "cache must survive snapshot roundtrip"
+        );
         assert_eq!(restored.ss_root_cache()[0].unwrap(), cached_root);
         assert_eq!(restored.tree_size(), tree.tree_size());
     }
