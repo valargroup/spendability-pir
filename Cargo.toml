@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["spend-types", "hashtable-pir", "nf-ingest", "spend-server", "spend-client"]
+members = [
+    "nullifier/spend-types",
+    "nullifier/hashtable-pir",
+    "nullifier/nf-ingest",
+    "nullifier/spend-server",
+    "nullifier/spend-client",
+]
 
 [profile.release]
 lto = "fat"
