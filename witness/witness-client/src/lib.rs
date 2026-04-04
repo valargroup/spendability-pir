@@ -1,0 +1,203 @@
+use pir_types::YpirScenario;
+use thiserror::Error;
+use witness_types::*;
+use ypir::client::YPIRClient;
+use ypir::params::params_for_scenario_simplepir;
+use ypir::serialize::ToBytes;
+
+mod reconstruct;
+
+#[derive(Error, Debug)]
+pub enum WitnessClientError {
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("server unavailable (503)")]
+    ServerUnavailable,
+    #[error("invalid params from server: {0}")]
+    InvalidParams(String),
+    #[error("query failed: {0}")]
+    QueryFailed(String),
+    #[error("position {0} is outside the server's PIR window (shards {1}..{2})")]
+    PositionOutsideWindow(u64, u32, u32),
+    #[error("witness verification failed for position {0}: computed root does not match anchor")]
+    VerificationFailed(u64),
+}
+
+pub type Result<T> = std::result::Result<T, WitnessClientError>;
+
+pub struct WitnessClient {
+    http: reqwest::Client,
+    base_url: String,
+    #[allow(dead_code)]
+    scenario: YpirScenario,
+    broadcast: BroadcastData,
+    ypir_client: YPIRClient,
+}
+
+impl WitnessClient {
+    /// Connect to a witness-server, fetch params and broadcast data, initialize
+    /// the YPIR client. The broadcast download is ~104 KB and cached for the
+    /// lifetime of this client.
+    pub async fn connect(url: &str) -> Result<Self> {
+        let base_url = url.trim_end_matches('/').to_string();
+        let http = reqwest::Client::new();
+
+        let scenario: YpirScenario = http
+            .get(format!("{base_url}/params"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let broadcast_resp = http.get(format!("{base_url}/broadcast")).send().await?;
+        if broadcast_resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(WitnessClientError::ServerUnavailable);
+        }
+        let broadcast: BroadcastData = broadcast_resp.error_for_status()?.json().await?;
+
+        let params = params_for_scenario_simplepir(scenario.num_items, scenario.item_size_bits);
+        let ypir_client = YPIRClient::new(&params);
+
+        tracing::info!(
+            base_url,
+            anchor_height = broadcast.anchor_height,
+            window_start = broadcast.window_start_shard,
+            window_count = broadcast.window_shard_count,
+            cap_shards = broadcast.cap.shard_roots.len(),
+            "connected to witness-server",
+        );
+
+        Ok(Self {
+            http,
+            base_url,
+            scenario,
+            broadcast,
+            ypir_client,
+        })
+    }
+
+    /// Fetch a note commitment witness for the given tree position.
+    ///
+    /// Issues a single YPIR query (~605 KB up, response ~36 KB) to retrieve the
+    /// subshard row containing the note's leaf. Combines the PIR response with
+    /// the cached broadcast data to reconstruct the full 32-level authentication
+    /// path. Self-verifies the witness before returning.
+    pub async fn get_witness(&self, position: u64) -> Result<PirWitness> {
+        let (shard_idx, subshard_idx, leaf_idx) = decompose_position(position);
+        let window_end = self.broadcast.window_start_shard + self.broadcast.window_shard_count;
+
+        if shard_idx < self.broadcast.window_start_shard || shard_idx >= window_end {
+            return Err(WitnessClientError::PositionOutsideWindow(
+                position,
+                self.broadcast.window_start_shard,
+                window_end,
+            ));
+        }
+
+        let row_idx =
+            physical_row_index(shard_idx, subshard_idx, self.broadcast.window_start_shard);
+
+        let (query, seed) = self.ypir_client.generate_query_simplepir(row_idx);
+        let query_bytes = query.to_bytes();
+
+        let resp = self
+            .http
+            .post(format!("{}/query", self.base_url))
+            .body(query_bytes)
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(WitnessClientError::ServerUnavailable);
+        }
+
+        let response_bytes = resp
+            .error_for_status()
+            .map_err(|e| WitnessClientError::QueryFailed(e.to_string()))?
+            .bytes()
+            .await?;
+
+        let decoded_row = self
+            .ypir_client
+            .decode_response_simplepir(seed, &response_bytes);
+
+        let witness = reconstruct::reconstruct_witness(
+            position,
+            shard_idx,
+            subshard_idx,
+            leaf_idx,
+            &decoded_row,
+            &self.broadcast,
+        )?;
+
+        Ok(witness)
+    }
+
+    /// Re-fetch broadcast data from the server (new anchor, updated tree).
+    pub async fn refresh_broadcast(&mut self) -> Result<()> {
+        let resp = self
+            .http
+            .get(format!("{}/broadcast", self.base_url))
+            .send()
+            .await?;
+
+        if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(WitnessClientError::ServerUnavailable);
+        }
+
+        self.broadcast = resp.error_for_status()?.json().await?;
+        Ok(())
+    }
+
+    pub fn anchor_height(&self) -> u64 {
+        self.broadcast.anchor_height
+    }
+
+    pub fn broadcast(&self) -> &BroadcastData {
+        &self.broadcast
+    }
+}
+
+/// Blocking wrapper for use from synchronous FFI contexts.
+pub struct WitnessClientBlocking {
+    rt: tokio::runtime::Runtime,
+    client: WitnessClient,
+}
+
+impl WitnessClientBlocking {
+    pub fn connect(url: &str) -> Result<Self> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| WitnessClientError::QueryFailed(e.to_string()))?;
+        let client = rt.block_on(WitnessClient::connect(url))?;
+        Ok(Self { rt, client })
+    }
+
+    /// Fetch witnesses for a batch of positions.
+    /// Returns a `Vec<PirWitness>` parallel to the input positions.
+    /// Calls `progress` after each query with fraction complete (0.0..=1.0).
+    pub fn get_witnesses(
+        &self,
+        positions: &[u64],
+        progress: impl Fn(f64),
+    ) -> Result<Vec<PirWitness>> {
+        let total = positions.len();
+        let mut results = Vec::with_capacity(total);
+        for (i, &pos) in positions.iter().enumerate() {
+            let witness = self.rt.block_on(self.client.get_witness(pos))?;
+            results.push(witness);
+            progress((i + 1) as f64 / total as f64);
+        }
+        Ok(results)
+    }
+
+    pub fn anchor_height(&self) -> u64 {
+        self.client.anchor_height()
+    }
+
+    pub fn broadcast(&self) -> &BroadcastData {
+        self.client.broadcast()
+    }
+}

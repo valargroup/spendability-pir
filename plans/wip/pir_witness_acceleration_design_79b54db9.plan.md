@@ -16,7 +16,7 @@ todos:
     status: done
   - id: witness-server
     content: "Build witness-server: Axum HTTP, single YPIR engine, broadcast endpoints for cap + sub-shard roots, sync/follow modes"
-    status: pending
+    status: done
   - id: witness-client
     content: "Build witness-client: single YPIRClient, cap + sub-shard root caching, witness reconstruction + self-verification"
     status: pending
