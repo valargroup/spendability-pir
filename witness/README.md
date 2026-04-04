@@ -30,7 +30,7 @@ At the current mainnet rate of ~3,465 Orchard notes/day (measured April 2026):
 - One shard fills in **~19 days**
 - 6-month window: **~623,694 notes = ~9.5 shards**
 - Total leaf data for 6 months: 623,694 × 32 = **~19.5 MB**
-- Total populated shards on mainnet: **~761 completed + 1 frontier**
+- Total populated shards on mainnet: **~761 completed + 1 frontier** (= ~49.9M cumulative notes / 65,536 per shard)
 
 | Period (heights) | Orchard notes | Sapling notes | Orchard/day |
 |------------------|--------------|---------------|-------------|
@@ -41,6 +41,8 @@ At the current mainnet rate of ~3,465 Orchard notes/day (measured April 2026):
 | 3,227,374 → 3,261,934 | 103,900 | 12,841 | 3,463 |
 | 3,261,934 → 3,296,494 | 77,637 | 12,653 | 2,588 |
 | **Total** | **623,694** | **80,673** | **~3,465 avg** |
+
+The Orchard commitment tree is **append-only** — notes are added sequentially from left to right, so the tree fills from position 0 onward. "Populated" means the shard contains at least one real note commitment: shards 0 through 760 are fully completed (all 65,536 leaf slots filled), shard 761 is the **frontier** (partially filled, currently receiving new notes), and shards 762 through 65,535 are completely empty. The count grows slowly — one new shard completes roughly every 19 days, adding 32 bytes to the cap broadcast. For the cap tree, the client fills unpopulated slots with `MerkleHashOrchard::empty_root(Level::from(16))` — a precomputed constant — so only the ~762 real roots contribute meaningful hashes.
 
 The small 6-month volume makes a three-tier design unnecessary. The design uses a single broadcast + single PIR tier. L0 is sized at 8,192 rows (32 shards, ~2.1M notes, 64 MB), covering ~1.7 years at current rates.
 
@@ -53,6 +55,8 @@ Depth 0 (root)
   |
   | Broadcast — cap (shard roots array)
   | 16 levels, ~762 populated shard roots on mainnet
+  | (the tree is append-only: shards 0..760 are completed,
+  |  761 is the frontier, 762..65535 are empty)
   | ~24 KB (762 x 32 bytes); client rebuilds cap tree locally
   |
 Depth 16 (shard roots)
@@ -70,6 +74,26 @@ Depth 24 (sub-shard roots)
 Depth 32 (note commitments)
 ```
 
+### Why these split points
+
+The split at **depth 16** is not arbitrary — it matches the Zcash protocol's `SHARD_HEIGHT = 16`, which is how `ShardTree` addresses leaves (`Position >> 16 = shard_index`). The PIR system decomposes the tree in exactly the same way the wallet does, so the `PirWitness` output is directly compatible with `MerklePath<MerkleHashOrchard>`.
+
+The split at **depth 24** (creating 256-leaf sub-shards) balances three constraints:
+
+1. **PIR row size**: 256 leaves × 32 bytes = 8 KB per row. Large enough that one PIR query returns a useful chunk of the tree, small enough for reasonable bandwidth (~605 KB per round trip).
+2. **PIR database size**: 32 shards × 256 sub-shards = 8,192 rows × 8 KB = 64 MB. YPIR setup takes ~3.5 seconds at this size, which fits comfortably within the ~75-second block interval for per-block rebuilds.
+3. **Broadcast efficiency**: The sub-shard roots (depth 16 → 24) are small enough to broadcast publicly — ~80 KB at 10 shards (6-month window), up to ~256 KB at full 32-shard capacity. This is a trivial download.
+
+**Why not three tiers?** An alternative design would PIR-query both the sub-shard roots (depth 16 → 24) and the leaf commitments (depth 24 → 32). But with only ~10 shards in a 6-month window, the middle tier would have ~10 rows. PIR on 10 rows is wasteful — the query/response overhead (~600 KB) dwarfs the data. Broadcasting ~80 KB instead eliminates one entire PIR round trip with no privacy cost, since all clients receive identical broadcast data.
+
+**Why this layout works well** — three properties of the Orchard tree make it amenable to this decomposition:
+
+- **Append-only**: New leaves are only added at the frontier. Once a shard fills, its data never changes. Most of the PIR database is static — only one sub-shard row mutates per block.
+- **Sparse at the top**: With ~762 shards out of 65,536 possible slots, the cap tree is mostly empty sentinels (precomputed constants). Broadcasting all real shard roots costs only ~24 KB.
+- **Dense at the bottom**: Within a populated sub-shard, all 256 leaf slots contain real commitments (or the level-0 empty sentinel at the frontier). One PIR row provides everything needed to reconstruct 8 levels of the tree locally.
+
+The net effect: **24 of 32 siblings come free** via broadcast, and only the bottom **8 require a private query**.
+
 ### Tier parameters
 
 - **Broadcast (cap + sub-shard roots)**: Downloaded periodically by the client (cached, refreshed when stale or on verification failure).
@@ -84,9 +108,17 @@ Depth 32 (note commitments)
   - Capacity: 32 shards = ~2.1M notes = ~1.7 years at current rates.
   - **Row layout**: Rows are dense within the window. The PIR database covers a contiguous shard range `[window_start_shard, window_start_shard + window_shard_count)`. Physical PIR row index = `(shard_index - window_start_shard) * 256 + subshard_index`. Rows beyond the populated range are zero-filled. The broadcast includes `window_start_shard` and `window_shard_count`.
 
-### Client witness reconstruction
+### Client query protocol
 
-Given a note at tree position P (32-bit):
+The client query process has a one-time initialization, a cached broadcast download, and a per-note PIR query.
+
+**Initialization** (once per session): `WitnessClient::connect(url)` calls `GET /params` to fetch the `YpirScenario` JSON (PIR database geometry: 8,192 rows × 8,192 bytes). The client initializes a `YPIRClient` with these parameters. This is cached for the session.
+
+**Broadcast download** (cached, refreshed when stale): `GET /broadcast` (~104 KB) returns cap data (all ~762 shard roots), sub-shard roots for the active PIR window, and metadata (`window_start_shard`, `window_shard_count`, `anchor_height`). This is a public, non-private download — all clients receive identical data. It is shared across all note queries in the session and only re-downloaded if the anchor height doesn't match a subsequent PIR response.
+
+**Per-note PIR query**: For each note at position P, the client:
+
+1. **Decomposes position P** (32-bit leaf index in the append-only tree):
 
 ```
 shard_index    = P >> 16          (which shard — top 16 bits)
@@ -94,10 +126,50 @@ subshard_index = (P >> 8) & 0xFF  (which sub-shard within shard — middle 8 bit
 leaf_index     = P & 0xFF         (which leaf within sub-shard — bottom 8 bits)
 ```
 
-1. **Broadcast data** (cached): Extract 16 cap siblings using `shard_index`, then 8 upper intra-shard siblings using `subshard_index` from the broadcast sub-shard roots. Verify: hash of 256 sub-shard roots matches the shard root from cap.
-2. **PIR query** for physical row `(shard_index - window_start_shard) * 256 + subshard_index`: Receive 256 leaf commitments. Build local 8-level tree, extract 8 lower siblings using `leaf_index`. Verify: hash of 256 leaves matches sub-shard root from broadcast.
-3. **Assemble**: 16 + 8 + 8 = 32 sibling hashes = complete Merkle authentication path.
-4. **Self-verify**: Hash the note commitment through all 32 siblings. Result must equal the anchor root (publicly known from the chain). This catches server errors or malicious data.
+2. **Validates the position** is within the PIR window: `shard_index` must be in `[window_start_shard, window_start_shard + window_shard_count)`. If not, returns `WitnessError::NoteOutsideWindow`.
+
+3. **Computes the physical PIR row** index:
+
+```
+physical_row = (shard_index - window_start_shard) × 256 + subshard_index
+```
+
+4. **Generates an encrypted YPIR query** for `physical_row`: `ypir_client.generate_query(physical_row)` produces ~605 KB — 541 KB of fixed `pub_params` (encryption parameters, same regardless of which row) plus ~64 KB of `packed_query_row` (encrypted indicator vector encoding the target row). The server processes this against all 8,192 rows and cannot determine which row was requested.
+
+5. **Sends the query** via `POST /query` (~605 KB upload). The server runs the YPIR online phase (~96ms), multiplying the query against all rows, and returns an encrypted response (~36 KB download).
+
+6. **Decodes the response** locally to recover 256 leaf commitments (8,192 bytes = 256 × 32). Leaf positions beyond the tree's frontier are `MerkleHashOrchard::empty_root(Level::from(0))`, not zero bytes.
+
+7. **Checks broadcast-to-PIR consistency**: If `broadcast.anchor_height ≠ query_response.anchor_height`, the server rebuilt the tree between the two requests. The client refetches the broadcast (~104 KB, cheap) and retries. For completed shards this never happens — their data is immutable regardless of anchor height. Only the frontier shard's active sub-shard can trigger a mismatch.
+
+### Client witness reconstruction
+
+Given the broadcast data and the decoded PIR response, the client reconstructs all 32 siblings locally:
+
+1. **16 cap siblings** (from broadcast): Build a 16-level cap tree from the ~762 shard roots (unpopulated slots filled with `empty_root(Level::from(16))`). Walk from `shard_root[shard_index]` up to the root, recording the sibling at each level. Verify: hash of 256 sub-shard roots for this shard matches `shard_root[shard_index]` from the cap.
+
+2. **8 sub-shard siblings** (from broadcast): Build an 8-level tree from the 256 sub-shard roots for `shard_index`. Walk from `subshard_root[subshard_index]` upward, recording 8 siblings.
+
+3. **8 leaf siblings** (from PIR response): Build an 8-level tree from the 256 decoded leaf commitments. Walk from `leaf[leaf_index]` upward, recording 8 siblings. Verify: hash of 256 leaves matches `subshard_root[subshard_index]` from the broadcast.
+
+4. **Assemble**: Concatenate siblings leaf-to-root: `siblings[0..7]` from leaves, `siblings[8..15]` from sub-shard roots, `siblings[16..31]` from cap. Total: 32 sibling hashes = complete Merkle authentication path.
+
+5. **Self-verify** the complete path against the publicly-known anchor root:
+
+```
+node = note_commitment
+for level in 0..32:
+    sibling = siblings[level]
+    if bit(P, level) == 0:
+        node = MerkleHashOrchard::combine(level, node, sibling)   // left child
+    else:
+        node = MerkleHashOrchard::combine(level, sibling, node)   // right child
+assert node == anchor_root
+```
+
+The `position` bits determine left/right direction at each level, and `combine` is the Sinsemilla hash via `MerkleHashOrchard::combine`. If verification passes, the witness is cryptographically valid — no trust in the server required. If it fails, the witness is discarded and not stored.
+
+The result is a `PirWitness { position, siblings: [MerkleHashOrchard; 32], anchor_height, anchor_root }`.
 
 ### Anchor depth and confirmation policy
 
@@ -112,10 +184,56 @@ One PIR database at one anchor height serves all confirmation policies. The 7-bl
 Follows the same per-block rebuild cycle as the nullifier PIR server: ingest each new block, update the tree, rebuild PIR, atomic swap via `ArcSwap`.
 
 - **Completed shards**: Immutable once full (~every 19 days). Compute once, serve forever.
-- **Frontier shard**: Updated every block. Only the active sub-shard row changes.
-- **Broadcast data**: Regenerated alongside every PIR rebuild. Negligible cost.
-- **Eviction**: Old sub-shard rows evicted when L0 exceeds 32 shards. At current volume this takes ~1.7 years.
-- **PIR rebuild**: At 64 MB (padded), full YPIR setup takes ~3.5 seconds — well under the 75-second block interval.
+- **Frontier shard**: Updated every block. Only the active sub-shard row changes — at ~3 notes/block, that's ~96 bytes of new leaf data per block.
+- **Broadcast data**: Regenerated alongside every PIR rebuild. Cap updates when a new shard completes (~every 19 days) or when the frontier hash changes (every block). Negligible cost.
+- **PIR rebuild**: At 64 MB (padded), full YPIR setup takes ~3.5 seconds — well under the 75-second block interval. The database is padded to 8,192 rows from the start, so rebuild time is constant regardless of fill level.
+
+### Server memory model
+
+The server does not materialize the full tree. It stores only boundary nodes at depths 0, 16, 24, and 32:
+
+- **Leaf commitments for the PIR window**: ~67 MB at capacity (32 shards × 65,536 leaves × 32 bytes)
+- **Serialized PIR database**: 64 MB (fixed, padded)
+- **Broadcast data**: < 1 MB (cap + sub-shard roots)
+- **Total steady-state memory: ~131 MB**
+
+What the server does **not** store:
+
+- **Internal tree nodes** at depths 1–15, 17–23, and 25–31. The client reconstructs these from the boundary data (broadcast roots and PIR-returned leaves). Sub-shard root trees (depth 17–23) are recomputed from stored sub-shard roots on demand when building broadcast data.
+- **Completed shards outside the PIR window**: folded to a 32-byte shard root and their leaf data discarded. The shard root survives permanently in the broadcast cap.
+- During **initial sync**, only the current shard's leaves (~2 MB) are held in flight before being folded or stored.
+
+### PIR window and eviction
+
+The PIR database is a **fixed-size sliding window** over the most recent 32 shards. It does not start at shard 0 — it covers wherever the recent history is (e.g. shards 730–761). The broadcast metadata includes `window_start_shard` and `window_shard_count` so the client can compute physical row indices.
+
+```
+Before (window full, 32 shards):
+  shard  730  731  732  ...  760  761
+  ├──────────── PIR window ────────────┤
+  window_start_shard = 730
+
+New shard 762 completes:
+  shard  731  732  733  ...  761  762
+  ├──────────── PIR window ────────────┤
+  window_start_shard = 731
+
+Shard 730: leaf data discarded, 32-byte shard root stays in broadcast cap.
+```
+
+When a new shard completes and the window would exceed 32 shards, the oldest shard is evicted: `window_start_shard` increments, its 256 sub-shard rows are dropped from the PIR database, and its sub-shard roots are removed from the broadcast's active window section. Physical row indices shift — row 0 always maps to `window_start_shard`.
+
+If a wallet's note falls outside the window, `get_witness()` returns `WitnessError::NoteOutsideWindow`. The wallet falls back to waiting for normal shard scanning. At current volume the window covers ~1.7 years, so this only affects very old notes.
+
+### Pruning and reorg handling
+
+**Server-side reorg**: When lightwalletd reports a chain reorganization, `commitment-tree-db.rollback_to(height)` removes all leaf commitments appended after `height`, recomputes the frontier shard's sub-shard roots, and triggers a PIR rebuild + `ArcSwap`. Completed shards are unaffected by reorgs — they are too deep to be rolled back.
+
+**Wallet-side reorg**: When `truncate_to_height` is called during a reorg, `pir_witness_data` rows with `anchor_height > truncation_height` are deleted. The witness was obtained at a tree state that is no longer canonical. The wallet re-queries PIR after the reorg settles.
+
+**Wallet-side note deletion**: `pir_witness_data` has `ON DELETE CASCADE` from `orchard_received_notes`. If the note itself is deleted, its witness is removed automatically.
+
+**Wallet-side shard catch-up**: When the wallet finishes scanning a shard, the PIR witness for notes in that shard becomes redundant — `ShardTree` can now produce witnesses locally. The transaction builder tries `ShardTree` first and only falls back to `pir_witness_data` if the shard is incomplete. No cleanup is needed: PIR witnesses are a cache, not source of truth. They can be safely deleted at any time without data loss.
 
 ### Scaling: LSM-style tiered PIR
 
