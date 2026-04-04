@@ -376,10 +376,10 @@ V1 builds L0 only. The `commitment-tree-db` API tracks completed vs. frontier sh
 
 ## Workspace layout
 
-Phase 0 (prerequisite): Restructure the current flat `sync-nullifier-pir/` workspace into a parent workspace with two sub-workspaces. The nullifier and witness systems are separate packages that share common dependencies.
+Phase 0 (prerequisite): Restructure the current flat `spendability-pir/` workspace into a parent workspace with two sub-workspaces. The nullifier and witness systems are separate packages that share common dependencies.
 
 ```
-sync-nullifier-pir/
+spendability-pir/
 ├── Cargo.toml                # parent workspace, defines [workspace] members + shared deps
 ├── proto/                    # shared: compact_formats.proto, service.proto
 ├── shared/

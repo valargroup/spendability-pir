@@ -74,7 +74,7 @@ The system spans four repositories and three runtime environments:
 
 | Repository | Role | Nullifier PIR code | Witness PIR code |
 |---|---|---|---|
-| `sync-nullifier-pir` | PIR servers + client libraries | `nullifier/spend-client/`, `nullifier/spend-types/` | `witness/witness-client/`, `witness/witness-types/` |
+| `spendability-pir` | PIR servers + client libraries | `nullifier/spend-client/`, `nullifier/spend-types/` | `witness/witness-client/`, `witness/witness-types/` |
 | `zcash-swift-wallet-sdk` | Rust FFI + Swift SDK | `rust/src/spendability.rs`, `SpendabilityBackend.swift`, `SpendabilityTypes.swift` | `rust/src/witness.rs`, `WitnessBackend.swift`, `WitnessTypes.swift` |
 | `zcash_client_sqlite` | Wallet database crate | `src/wallet/common.rs` (`spent_notes_clause`, `unscanned_tip_exists` bypass), `src/wallet.rs` (`is_any_spendable` bypass, `truncate_to_height`) | `src/wallet/pir_witness.rs`, `src/wallet/common.rs` (`shard_scanned_condition` bypass) |
 | `zcash_client_backend` | Wallet logic crate | — | `src/data_api.rs` (`get_pir_orchard_merkle_path` trait method), `src/data_api/wallet.rs` (`pir_orchard_witness_fallback`) |
@@ -204,7 +204,7 @@ CREATE TABLE pir_spent_notes (
 - **Single column:** `note_id` references `orchard_received_notes.id`
 - **No transaction reference:** PIR confirms a nullifier was spent, not which transaction spent it
 
-**Integration point — `spent_notes_clause`:** When `sync-nullifier-pir` is enabled and the table prefix is `"orchard"`, the clause UNIONs `pir_spent_notes` into the spent-notes subquery. This affects all balance and note-selection queries (`get_wallet_summary`, `select_spendable_notes`, etc.).
+**Integration point — `spent_notes_clause`:** When `spendability-pir` is enabled and the table prefix is `"orchard"`, the clause UNIONs `pir_spent_notes` into the spent-notes subquery. This affects all balance and note-selection queries (`get_wallet_summary`, `select_spendable_notes`, etc.).
 
 **Lifecycle:**
 
@@ -272,17 +272,17 @@ Both tables are created unconditionally by their migrations (schema is identical
 
 Without PIR, four independent safety mechanisms prevent spending notes before the wallet is confident they are unspent and can construct a valid proof. PIR bypasses these for Orchard when enabled.
 
-### Gate 1: `is_any_spendable` (Rust, `wallet.rs`, `sync-nullifier-pir`)
+### Gate 1: `is_any_spendable` (Rust, `wallet.rs`, `spendability-pir`)
 
 In `get_wallet_summary`, checks whether any unscanned shard ranges overlap the anchor height. If they do, all notes are routed to `value_pending_spendability` — the balance display shows zero spendable.
 
-**PIR bypass:** When `sync-nullifier-pir` is enabled, `any_spendable` is unconditionally `true` for Orchard. Sapling retains the original check.
+**PIR bypass:** When `spendability-pir` is enabled, `any_spendable` is unconditionally `true` for Orchard. Sapling retains the original check.
 
-### Gate 2: `unscanned_tip_exists` (Rust, `common.rs`, `sync-nullifier-pir`)
+### Gate 2: `unscanned_tip_exists` (Rust, `common.rs`, `spendability-pir`)
 
 In `select_spendable_notes`, returns an empty vec if unscanned ranges exist — `proposeTransfer` fails even if the UI shows a balance.
 
-**PIR bypass:** When `sync-nullifier-pir` is enabled, the check is skipped for Orchard.
+**PIR bypass:** When `spendability-pir` is enabled, the check is skipped for Orchard.
 
 ### Gate 3: `chainTipUpdated` (Swift, `ZcashRustBackend.swift`)
 
@@ -328,7 +328,7 @@ getWalletSummary (Swift)      chainTipUpdated gates    Orchard: preserved if
 
 Two Cargo features in `zcash_client_sqlite` control PIR integration:
 
-### `sync-nullifier-pir`
+### `spendability-pir`
 
 | Aspect | Feature OFF | Feature ON |
 |---|---|---|
@@ -386,9 +386,9 @@ In both cases, server unavailability is non-fatal. The wallet falls back to stan
 ## Cross-Crate Dependency Graph
 
 ```
-sync-nullifier-pir/spend-client ──┐
+spendability-pir/spend-client ──┐
                                    ├──> zcash-swift-wallet-sdk/rust (libzcashlc)
-sync-nullifier-pir/witness-client ─┘           │
+spendability-pir/witness-client ─┘           │
                                                │ path dependency
                                                ▼
                                         zcash_client_sqlite

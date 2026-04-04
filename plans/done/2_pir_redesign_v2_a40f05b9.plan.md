@@ -3,13 +3,13 @@ name: PIR Redesign v2
 overview: Redesign PIR integration to mark spent notes in a dedicated `pir_spent_notes` table at the Rust/DB layer, with `spent_notes_clause` extended to include it. Eliminates the Swift balance overlay from production balance calculations (PIR debug screen retained), making the wallet database the single source of truth for both balance display and note selection.
 todos:
   - id: pir-feature-flag
-    content: Add `sync-nullifier-pir` feature flag to zcash_client_sqlite Cargo.toml (default off), enable it in zcash-swift-wallet-sdk Cargo.toml
+    content: Add `spendability-pir` feature flag to zcash_client_sqlite Cargo.toml (default off), enable it in zcash-swift-wallet-sdk Cargo.toml
     status: done
   - id: pir-table-migration
     content: Add `pir_spent_notes` table via unconditional schema migration in zcash_client_sqlite, and add the table constant to db.rs
     status: done
   - id: modify-spent-notes-clause
-    content: Modify `spent_notes_clause` in common.rs to conditionally UNION with `pir_spent_notes` behind cfg(feature = "sync-nullifier-pir"), and update `UNSPENT_ORCHARD_NOTES_SQL` in spendability.rs
+    content: Modify `spent_notes_clause` in common.rs to conditionally UNION with `pir_spent_notes` behind cfg(feature = "spendability-pir"), and update `UNSPENT_ORCHARD_NOTES_SQL` in spendability.rs
     status: done
   - id: pir-write-back
     content: Modify `zcashlc_check_wallet_spendability` to open DB read-write and insert spent note IDs into `pir_spent_notes`
@@ -113,7 +113,7 @@ Unlike the previous Swift overlay (which only adjusted displayed balances), `pir
 
 ### Feature-Flagged PIR
 
-All PIR runtime paths in `zcash_client_sqlite` are gated behind a Cargo feature flag `sync-nullifier-pir` (disabled by default). The `pir_spent_notes` table is always created (migration is unconditional) to keep the migration DAG identical across all builds. When the feature is off:
+All PIR runtime paths in `zcash_client_sqlite` are gated behind a Cargo feature flag `spendability-pir` (disabled by default). The `pir_spent_notes` table is always created (migration is unconditional) to keep the migration DAG identical across all builds. When the feature is off:
 
 - The `pir_spent_notes` table exists but is empty and unused
 - `spent_notes_clause` returns the original query with no UNION
@@ -170,9 +170,9 @@ SQLite serializes all writes under a single write lock, so both `NOT EXISTS` che
 
 ### Decision 3: Unconditional Migration, Feature-Gated Runtime Paths
 
-**Chosen:** The `pir_spent_notes` table is always created (migration runs regardless of the `sync-nullifier-pir` feature flag). Only the runtime query paths (`spent_notes_clause` UNION, PIR write-back) are `#[cfg]`-gated.
+**Chosen:** The `pir_spent_notes` table is always created (migration runs regardless of the `spendability-pir` feature flag). Only the runtime query paths (`spent_notes_clause` UNION, PIR write-back) are `#[cfg]`-gated.
 
-**Alternative:** Gate the entire migration behind `#[cfg(feature = "sync-nullifier-pir")]`.
+**Alternative:** Gate the entire migration behind `#[cfg(feature = "spendability-pir")]`.
 
 **Rationale:** `schemerz` (the migration framework) tracks applied migrations by UUID. If a developer builds without the feature, creates a DB, then later enables the feature, the migration system sees a new unresolved migration and must apply it. This works, but the migration DAG differs across builds, which is unusual and fragile. An unconditional migration keeps the DAG identical everywhere. For non-PIR builds, the table is empty and the unconditional `DELETE FROM pir_spent_notes` in `truncate_to_height` is a harmless no-op.
 
@@ -224,20 +224,20 @@ SQLite serializes all writes under a single write lock, so both `NOT EXISTS` che
 
 ### 1. Feature Flag and `pir_spent_notes` Table (Schema Migration)
 
-Add a `sync-nullifier-pir` feature to [zcash_client_sqlite/Cargo.toml](zcash_client_sqlite/zcash_client_sqlite/Cargo.toml):
+Add a `spendability-pir` feature to [zcash_client_sqlite/Cargo.toml](zcash_client_sqlite/zcash_client_sqlite/Cargo.toml):
 
 ```toml
 [features]
 # ...existing features...
 
 ## Enables PIR (Private Information Retrieval) spent note tracking.
-sync-nullifier-pir = []
+spendability-pir = []
 ```
 
 Enable it in [zcash-swift-wallet-sdk/Cargo.toml](zcash-swift-wallet-sdk/Cargo.toml):
 
 ```toml
-zcash_client_sqlite = { path = "...", features = ["orchard", "transparent-inputs", "unstable", "serde", "sync-nullifier-pir"] }
+zcash_client_sqlite = { path = "...", features = ["orchard", "transparent-inputs", "unstable", "serde", "spendability-pir"] }
 ```
 
 A new table in `zcash_client_sqlite` to hold PIR-identified spent notes. No FK to `transactions` — clean and self-contained. An FK to `orchard_received_notes(id)` with `ON DELETE CASCADE` ensures that PIR entries are automatically cleaned up on wallet rescan or account deletion, matching the pattern used by `orchard_received_note_spends`.
@@ -251,7 +251,7 @@ CREATE TABLE pir_spent_notes (
 
 This table is Orchard-only. There is no `pool` column since PIR only applies to Orchard notes.
 
-**Migration:** Follow the existing pattern in [migrations/nullifier_map.rs](zcash_client_sqlite/zcash_client_sqlite/src/wallet/init/migrations/nullifier_map.rs). Create a new migration module `pir_spent_notes.rs` with a UUID, depending on `account_delete_cascade` (the current leaf migration). The migration is **unconditional** (not gated by `#[cfg(feature = "sync-nullifier-pir")]`) — the table is always created regardless of the feature flag. This keeps the migration DAG identical across all builds, avoiding edge cases with `schemerz` when toggling features. The feature flag only gates the runtime/query paths that read from or write to the table. Register it in [migrations.rs](zcash_client_sqlite/zcash_client_sqlite/src/wallet/init/migrations.rs) without any feature gate. Add the table DDL constant to [db.rs](zcash_client_sqlite/zcash_client_sqlite/src/wallet/db.rs).
+**Migration:** Follow the existing pattern in [migrations/nullifier_map.rs](zcash_client_sqlite/zcash_client_sqlite/src/wallet/init/migrations/nullifier_map.rs). Create a new migration module `pir_spent_notes.rs` with a UUID, depending on `account_delete_cascade` (the current leaf migration). The migration is **unconditional** (not gated by `#[cfg(feature = "spendability-pir")]`) — the table is always created regardless of the feature flag. This keeps the migration DAG identical across all builds, avoiding edge cases with `schemerz` when toggling features. The feature flag only gates the runtime/query paths that read from or write to the table. Register it in [migrations.rs](zcash_client_sqlite/zcash_client_sqlite/src/wallet/init/migrations.rs) without any feature gate. Add the table DDL constant to [db.rs](zcash_client_sqlite/zcash_client_sqlite/src/wallet/db.rs).
 
 ### 2. Modify `spent_notes_clause` to Include PIR Table
 
@@ -268,7 +268,7 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
         "#,
         unexpired = tx_unexpired_condition("stx")
     );
-    #[cfg(feature = "sync-nullifier-pir")]
+    #[cfg(feature = "spendability-pir")]
     if table_prefix == "orchard" {
         // PIR rows are unconditional (no tx_unexpired_condition) because they
         // reflect confirmed on-chain nullifier state, not pending transactions.
@@ -281,7 +281,7 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
 }
 ```
 
-The `#[cfg(feature = "sync-nullifier-pir")]` gate ensures the UNION is only compiled in when the `sync-nullifier-pir` feature is enabled. Without the feature, the function is identical to upstream. This single change covers all Orchard query paths: `get_wallet_summary`, `select_spendable_notes`, `select_unspent_notes`, `get_spendable_note`, etc.
+The `#[cfg(feature = "spendability-pir")]` gate ensures the UNION is only compiled in when the `spendability-pir` feature is enabled. Without the feature, the function is identical to upstream. This single change covers all Orchard query paths: `get_wallet_summary`, `select_spendable_notes`, `select_unspent_notes`, `get_spendable_note`, etc.
 
 **Semantic note:** The base query filters real spend entries by `tx_unexpired_condition` — a note can become "un-excluded" if its spending transaction expires. PIR entries have no such condition; they are unconditional exclusions. This asymmetry is intentional: PIR entries reflect confirmed on-chain state (the nullifier exists in the chain's nullifier set), not pending transaction status. The only invalidation path is `truncate_to_height`, which clears all PIR rows on reorg/rescan so the next PIR check re-queries the canonical chain state.
 

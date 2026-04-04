@@ -30,14 +30,14 @@ Grab the latest release from GitHub:
 ```bash
 # Pick the asset for your platform
 PLATFORM="linux-amd64"   # or: linux-arm64, darwin-arm64
-VERSION=$(curl -s https://api.github.com/repos/valargroup/sync-nullifier-pir/releases/latest | grep tag_name | cut -d'"' -f4)
+VERSION=$(curl -s https://api.github.com/repos/valargroup/spendability-pir/releases/latest | grep tag_name | cut -d'"' -f4)
 
 sudo mkdir -p /opt/spend-server
 cd /opt/spend-server
 
 # Download the binary and systemd unit
-curl -fLO "https://github.com/valargroup/sync-nullifier-pir/releases/download/${VERSION}/spend-server-${PLATFORM}"
-curl -fLO "https://github.com/valargroup/sync-nullifier-pir/releases/download/${VERSION}/spend-server.service"
+curl -fLO "https://github.com/valargroup/spendability-pir/releases/download/${VERSION}/spend-server-${PLATFORM}"
+curl -fLO "https://github.com/valargroup/spendability-pir/releases/download/${VERSION}/spend-server.service"
 
 sudo mv "spend-server-${PLATFORM}" spend-server
 sudo chmod +x spend-server

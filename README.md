@@ -17,7 +17,7 @@ Both are sync-time accelerators: once the wallet catches up, PIR is unnecessary.
 ## Workspace
 
 ```
-sync-nullifier-pir/
+spendability-pir/
 ├── shared/
 │   ├── pir-types/            # PirEngine trait, YpirScenario, ServerPhase, CONFIRMATION_DEPTH
 │   └── chain-ingest/         # LwdClient, ChainTracker, sync/follow streams

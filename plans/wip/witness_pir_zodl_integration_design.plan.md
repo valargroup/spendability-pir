@@ -100,7 +100,7 @@ Witness PIR removes this second blocker by providing the authentication path ext
                 │
                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  witness-client (sync-nullifier-pir/witness/witness-client)     │
+│  witness-client (spendability-pir/witness/witness-client)     │
 │  WitnessClientBlocking::connect / get_witness(position)         │
 └─────────────────────────────────────────────────────────────────┘
                 │
@@ -115,7 +115,7 @@ Witness PIR removes this second blocker by providing the authentication path ext
 
 ### 1.1 Feature flag
 
-New Cargo feature `sync-witness-pir`, independent of `sync-nullifier-pir`. Both can be enabled simultaneously (and should be for full PIR acceleration). The feature gates:
+New Cargo feature `sync-witness-pir`, independent of `spendability-pir`. Both can be enabled simultaneously (and should be for full PIR acceleration). The feature gates:
 - The `pir_witness_data` table migration (table always created, data only populated when feature is on)
 - The shard-scanned gate bypass in coin selection
 - The witness injection fallback in the transaction builder
@@ -267,7 +267,7 @@ AND (
 
 This allows notes with PIR witnesses to be selected even when their shard isn't fully scanned. The transaction builder (below) handles providing the witness from `pir_witness_data` instead of from the ShardTree.
 
-Combined with `sync-nullifier-pir` (which bypasses `unscanned_tip_exists`), both gates are now removed for Orchard notes: the unscanned-tip gate is skipped entirely, and the shard-scanned gate is relaxed for PIR-witnessed notes. The result: an Orchard note becomes spendable as soon as both nullifier PIR confirms it's unspent AND witness PIR provides its authentication path — regardless of sync progress.
+Combined with `spendability-pir` (which bypasses `unscanned_tip_exists`), both gates are now removed for Orchard notes: the unscanned-tip gate is skipped entirely, and the shard-scanned gate is relaxed for PIR-witnessed notes. The result: an Orchard note becomes spendable as soon as both nullifier PIR confirms it's unspent AND witness PIR provides its authentication path — regardless of sync progress.
 
 ### 1.5 Transaction builder witness injection
 

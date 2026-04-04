@@ -3,7 +3,7 @@ name: Change Note Tracking Design
 overview: Analyze the spend-change gap in the current PIR witness design and propose a "change note tracking" extension that enables recursive balance discovery — when nullifier PIR detects a spend, the wallet can immediately discover the change note without waiting for sync.
 todos:
   - id: write-analysis
-    content: Write the change note tracking analysis and design as a new plan document in sync-nullifier-pir/plans/future/
+    content: Write the change note tracking analysis and design as a new plan document in spendability-pir/plans/future/
     status: pending
 isProject: false
 ---
@@ -53,21 +53,21 @@ struct NullifierEntry {
 }
 ```
 
-**Impact on existing nullifier PIR database** (`[spend-types/src/lib.rs](sync-nullifier-pir/nullifier/spend-types/src/lib.rs)`):
+**Impact on existing nullifier PIR database** (`[spend-types/src/lib.rs](spendability-pir/nullifier/spend-types/src/lib.rs)`):
 
 - `ENTRY_BYTES`: 32 -> 41
 - `BUCKET_BYTES`: 112 x 41 = 4,592 (was 3,584)
 - `DB_BYTES`: 16,384 x 4,592 = ~72 MB (was ~56 MB, **+29%**)
 - Rebuild time scales proportionally -- still well within 75-second block interval
 
-**Ingest changes**: The `[nf-ingest` parser](sync-nullifier-pir/nullifier/nf-ingest/src/parser.rs) currently extracts only `action.nullifier` from each `CompactOrchardAction`. It already iterates over `block.vtx` transactions. The extension requires tracking `orchardCommitmentTreeSize` from `ChainMetadata` (already available in compact blocks) to compute each transaction's `first_output_position`, exactly as `scan_block` in `[scanning.rs](zcash_client_sqlite/zcash_client_backend/src/scanning.rs)` does:
+**Ingest changes**: The `[nf-ingest` parser](spendability-pir/nullifier/nf-ingest/src/parser.rs) currently extracts only `action.nullifier` from each `CompactOrchardAction`. It already iterates over `block.vtx` transactions. The extension requires tracking `orchardCommitmentTreeSize` from `ChainMetadata` (already available in compact blocks) to compute each transaction's `first_output_position`, exactly as `scan_block` in `[scanning.rs](zcash_client_sqlite/zcash_client_backend/src/scanning.rs)` does:
 
 ```
 orchard_tree_size_before_block = chain_meta.orchard_commitment_tree_size - sum(tx.actions.len() for tx in block.vtx)
 per-tx: first_output_position = running_tree_size; running_tree_size += tx.actions.len()
 ```
 
-The `ChainEvent::NewBlock` gains a `Vec<NullifierWithMeta>` instead of `Vec<[u8; 32]>`. The `HashTableDb` entry format changes accordingly -- `[Bucket](sync-nullifier-pir/nullifier/hashtable-pir/src/lib.rs)` becomes `entries: [NullifierEntry; BUCKET_CAPACITY]`, and `[scan_bucket_for_nf](sync-nullifier-pir/nullifier/spend-client/src/lib.rs)` parses 41-byte chunks, matching on the first 32 bytes and extracting metadata on match.
+The `ChainEvent::NewBlock` gains a `Vec<NullifierWithMeta>` instead of `Vec<[u8; 32]>`. The `HashTableDb` entry format changes accordingly -- `[Bucket](spendability-pir/nullifier/hashtable-pir/src/lib.rs)` becomes `entries: [NullifierEntry; BUCKET_CAPACITY]`, and `[scan_bucket_for_nf](spendability-pir/nullifier/spend-client/src/lib.rs)` parses 41-byte chunks, matching on the first 32 bytes and extracting metadata on match.
 
 ### Component 2: Decryption PIR database
 

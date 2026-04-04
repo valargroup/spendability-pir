@@ -3,7 +3,7 @@ name: PIR Witness Acceleration Design
 overview: Design a PIR-based system that privately serves note commitment tree witness data during sync, enabling notes to become spendable immediately upon discovery before the wallet finishes scanning. Once synced, the wallet constructs witnesses locally via ShardTree — PIR bridges the sync gap.
 todos:
   - id: workspace-reorg
-    content: "Restructure sync-nullifier-pir into a parent workspace with two sub-workspaces: nullifier/ (existing spend-types, hashtable-pir, nf-ingest, spend-server, spend-client) and witness/ (new crates). Shared deps (ypir, spiral-rs, proto, PirEngine) lifted to parent."
+    content: "Restructure spendability-pir into a parent workspace with two sub-workspaces: nullifier/ (existing spend-types, hashtable-pir, nf-ingest, spend-server, spend-client) and witness/ (new crates). Shared deps (ypir, spiral-rs, proto, PirEngine) lifted to parent."
     status: done
   - id: witness-types
     content: Create witness-types crate with tree constants, PirWitness type, cap/metadata structures
@@ -154,7 +154,7 @@ Both the broadcast and the PIR response include the anchor height. The client co
 
 ### Database update strategy
 
-Follows the same per-block rebuild cycle as the nullifier PIR server (`spend-server`'s follow loop): ingest each new block, update the tree, rebuild PIR, atomic swap via `ArcSwap`. The ingest and rebuild infrastructure from `sync-nullifier-pir` (chain tracking, reorg handling, snapshot/restore, follow loop, `ArcSwap` state management) is reused directly — `commitment-ingest` replaces `nf-ingest`'s parser but shares `ChainTracker`, `LwdClient`, and the sync/follow lifecycle.
+Follows the same per-block rebuild cycle as the nullifier PIR server (`spend-server`'s follow loop): ingest each new block, update the tree, rebuild PIR, atomic swap via `ArcSwap`. The ingest and rebuild infrastructure from `spendability-pir` (chain tracking, reorg handling, snapshot/restore, follow loop, `ArcSwap` state management) is reused directly — `commitment-ingest` replaces `nf-ingest`'s parser but shares `ChainTracker`, `LwdClient`, and the sync/follow lifecycle.
 
 - **Completed shards**: Sub-shard root data (broadcast) and leaf rows (PIR) are **immutable** once the shard is full (~every 19 days). Compute once, serve forever.
 - **Frontier shard**: Updated every block. Only the active sub-shard row changes; other sub-shards within the frontier may already be complete. At ~3 notes/block, the frontier sub-shard row changes by ~96 bytes per block.
@@ -262,10 +262,10 @@ The v1 implementation builds L0 only. At current volume, L0's 32-shard capacity 
 
 ### Workspace layout and reorganization
 
-Phase 0 (prerequisite): Restructure the current flat `sync-nullifier-pir/` workspace into a parent workspace with two sub-workspaces. The nullifier and witness systems are separate packages that share common dependencies.
+Phase 0 (prerequisite): Restructure the current flat `spendability-pir/` workspace into a parent workspace with two sub-workspaces. The nullifier and witness systems are separate packages that share common dependencies.
 
 ```
-sync-nullifier-pir/
+spendability-pir/
 ├── Cargo.toml                # parent workspace, defines [workspace] members + shared deps
 ├── proto/                    # shared: compact_formats.proto, service.proto
 ├── shared/
@@ -341,8 +341,8 @@ Reuse the YPIR engine, HTTP framework, and ingest patterns via the shared crates
   - `subshard_roots(shard_idx) -> [Hash; 256]` — broadcast data
   - `subshard_leaves(shard_idx, subshard_idx) -> [Hash; 256]` — PIR row data. Leaf positions beyond the tree's current frontier are filled with `MerkleHashOrchard::empty_root(Level::from(0))`, **not** zero bytes. This ensures the client computes the correct sub-shard root for partially-filled sub-shards (the frontier).
   - `build_pir_db() -> Vec<u8>` — row-major bytes for single YPIR setup. Rows within the populated window use `subshard_leaves()` (which includes proper empty-leaf sentinels). Padding rows beyond the window are zero-filled — the client never queries these, they exist only to pad the database to a power of two.
-  - Snapshot/restore (same pattern as `[hashtable-pir/src/snapshot.rs](sync-nullifier-pir/hashtable-pir/src/snapshot.rs)`)
-- `**witness-server`**: Axum HTTP server (same pattern as `[spend-server](sync-nullifier-pir/spend-server/src/server.rs)`):
+  - Snapshot/restore (same pattern as `[hashtable-pir/src/snapshot.rs](spendability-pir/hashtable-pir/src/snapshot.rs)`)
+- `**witness-server`**: Axum HTTP server (same pattern as `[spend-server](spendability-pir/spend-server/src/server.rs)`):
   - `GET /health` — liveness
   - `GET /metadata` — anchor height, tree size, epoch, `window_start_shard`, `window_shard_count`
   - `GET /broadcast` — shard roots array + sub-shard roots for active window (~104–280 KB). Includes `window_start_shard` and `window_shard_count` so the client can map note positions to physical PIR row indices. Client rebuilds the depth-16 cap tree locally from the shard roots.
@@ -350,7 +350,7 @@ Reuse the YPIR engine, HTTP framework, and ingest patterns via the shared crates
   - `POST /query` — YPIR query against the sub-shard leaf database
   - Single `PirEngine` instance
   - Exposes `build_router()` as a library function (like `spend-server` does) so the combined server can mount it
-- **witness-client**: Client library mirroring `[spend-client](sync-nullifier-pir/spend-client/src/lib.rs)`:
+- **witness-client**: Client library mirroring `[spend-client](spendability-pir/spend-client/src/lib.rs)`:
   - `WitnessClient::connect(url)` — fetch params, initialize single `YPIRClient`
   - `get_broadcast()` — download and cache cap + sub-shard roots
   - `get_witness(position) -> Result<PirWitness, WitnessError>` — checks position is within the server's window (using `window_start_shard` and `window_shard_count` from cached broadcast), issues one PIR query, reconstructs the authentication path locally, self-verifies against the anchor root. Returns `WitnessError::NoteOutsideWindow` if the note's shard falls outside `[window_start_shard, window_start_shard + window_shard_count)` — the wallet should fall back to waiting for local scan.
@@ -382,7 +382,7 @@ Constraint: the logical sub-shard address is `(shard_index, subshard_index)`, de
 
 When the wallet is later modified to use PIR witnesses, it needs to bypass two gates:
 
-1. `unscanned_tip_exists()` — same `skip_unscanned_check` pattern already used for `sync-nullifier-pir` Orchard notes (`[common.rs:554-557](zcash_client_sqlite/zcash_client_sqlite/src/wallet/common.rs)`).
+1. `unscanned_tip_exists()` — same `skip_unscanned_check` pattern already used for `spendability-pir` Orchard notes (`[common.rs:554-557](zcash_client_sqlite/zcash_client_sqlite/src/wallet/common.rs)`).
 2. `scan_state.max_priority <= Scanned` — the SQL filter in `select_spendable_notes_matching_value` that requires the note's shard to be fully scanned.
 
 The PIR system does not need to implement these bypasses, but the `PirWitness` it produces carries all necessary information (position, siblings, anchor height, anchor root) for the wallet to store in a side table (cf. `pir_spent_notes`) and use during note selection and transaction building.

@@ -193,7 +193,7 @@ Orphaned nullifiers are removed instantly — the table never serves stale data 
 
 ## Wallet integration
 
-Wallet-side PIR integration spans three repositories (`zcash_client_sqlite`, `zcash-swift-wallet-sdk`, `zodl-ios`) controlled by the `sync-nullifier-pir` Cargo feature.
+Wallet-side PIR integration spans three repositories (`zcash_client_sqlite`, `zcash-swift-wallet-sdk`, `zodl-ios`) controlled by the `spendability-pir` Cargo feature.
 
 ### Database integration
 
@@ -201,7 +201,7 @@ Wallet-side PIR integration spans three repositories (`zcash_client_sqlite`, `zc
 
 ### Spendability gate bypass
 
-Three gates normally force `spendableValue` to zero during sync. When `sync-nullifier-pir` is enabled, all three are bypassed for Orchard (Sapling retains the original checks):
+Three gates normally force `spendableValue` to zero during sync. When `spendability-pir` is enabled, all three are bypassed for Orchard (Sapling retains the original checks):
 
 1. **`is_any_spendable`** (Rust): Unconditionally `true` for Orchard.
 2. **`unscanned_tip_exists`** (Rust): Check skipped for Orchard.
