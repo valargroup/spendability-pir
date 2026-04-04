@@ -52,11 +52,8 @@ fn compute_empty_roots() -> Vec<Hash> {
     let mut current = MerkleHashOrchard::empty_leaf();
     roots.push(current.to_bytes());
     for level in 0..TREE_DEPTH {
-        current = <MerkleHashOrchard as Hashable>::combine(
-            Level::from(level as u8),
-            &current,
-            &current,
-        );
+        current =
+            <MerkleHashOrchard as Hashable>::combine(Level::from(level as u8), &current, &current);
         roots.push(current.to_bytes());
     }
     roots
@@ -182,11 +179,11 @@ fn sparse_subtree_root(
 /// the tree root. Uses position bits for left/right ordering at each level.
 fn hash_to_root(leaf: &Hash, siblings: &[Hash; TREE_DEPTH], position: u64) -> Hash {
     let mut current = *leaf;
-    for level in 0..TREE_DEPTH {
+    for (level, sibling) in siblings.iter().enumerate() {
         let (left, right) = if (position >> level) & 1 == 0 {
-            (&current, &siblings[level])
+            (&current, sibling)
         } else {
-            (&siblings[level], &current)
+            (sibling, &current)
         };
         current = sinsemilla_combine(level as u8, left, right);
     }
