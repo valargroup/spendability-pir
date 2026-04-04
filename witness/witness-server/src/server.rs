@@ -90,7 +90,10 @@ fn rebuild_pir<P: PirEngine>(
         db_bytes = db_bytes.len(),
         tree_size = metadata.tree_size,
         shards = metadata.populated_shards,
-        window = format_args!("{}..+{}", metadata.window_start_shard, metadata.window_shard_count),
+        window = format_args!(
+            "{}..+{}",
+            metadata.window_start_shard, metadata.window_shard_count
+        ),
         anchor_height,
         "pir rebuild complete",
     );
@@ -111,9 +114,7 @@ async fn prepare_tree(
     client: &mut chain_ingest::LwdClient,
     tip_height: u64,
 ) -> Result<(CommitmentTreeDb, u64, Option<u32>)> {
-    let subtree_roots = client
-        .get_subtree_roots(ORCHARD_PROTOCOL, 0, 65535)
-        .await?;
+    let subtree_roots = client.get_subtree_roots(ORCHARD_PROTOCOL, 0, 65535).await?;
     let num_completed = subtree_roots.len();
 
     tracing::info!(

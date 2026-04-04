@@ -29,7 +29,13 @@ impl CommitmentTreeDb {
         let block_count = self.blocks().len();
         let local_leaves = self.leaves().len();
         let prefetched_count = self.prefetched_shard_roots().len();
-        let estimated = 8 + 8 + 8 + 8 + 32 + 8 + 8
+        let estimated = 8
+            + 8
+            + 8
+            + 8
+            + 32
+            + 8
+            + 8
             + prefetched_count * 32
             + block_count * BLOCK_RECORD_SIZE
             + local_leaves * 32
