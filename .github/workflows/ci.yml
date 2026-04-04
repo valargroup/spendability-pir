@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,6 +19,7 @@ jobs:
       shared: ${{ steps.filter.outputs.shared }}
       nullifier: ${{ steps.filter.outputs.nullifier }}
       witness: ${{ steps.filter.outputs.witness }}
+      code: ${{ steps.filter.outputs.code }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -34,32 +36,31 @@ jobs:
               - 'nullifier/**'
             witness:
               - 'witness/**'
+            code:
+              - '**/*.rs'
+              - '**/*.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
 
-  fmt:
-    name: Format
+  lint:
+    name: Lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2025-03-15
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2025-03-15
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets
 
   test-nullifier:
@@ -123,7 +124,7 @@ jobs:
   test-tree-correctness:
     name: Test (tree correctness)
     needs: changes
-    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true'
+    if: github.event_name == 'push' && (needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -185,7 +186,7 @@ jobs:
   test-ypir:
     name: Test (YPIR)
     needs: changes
-    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.nullifier == 'true'
+    if: github.event_name == 'push' && (needs.changes.outputs.shared == 'true' || needs.changes.outputs.nullifier == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -204,7 +205,7 @@ jobs:
   notify-slack:
     name: Slack Notification
     if: ${{ always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && contains(join(needs.*.result, ','), 'failure') }}
-    needs: [fmt, clippy, test-nullifier, test-witness, test-tree-correctness, test-pir-round-trip, test-ypir]
+    needs: [lint, test-nullifier, test-witness, test-tree-correctness, test-pir-round-trip, test-ypir]
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack on failure
@@ -231,7 +232,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nFormat: `${{ needs.fmt.result }}` | Clippy: `${{ needs.clippy.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | PIR: `${{ needs.test-pir-round-trip.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
+                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nLint: `${{ needs.lint.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | PIR: `${{ needs.test-pir-round-trip.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
                 }
               ]
             }
