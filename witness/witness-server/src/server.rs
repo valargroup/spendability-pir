@@ -59,19 +59,15 @@ fn rebuild_pir<P: PirEngine>(
 ) -> std::result::Result<PirState<P>, ServerError> {
     let total_start = std::time::Instant::now();
 
-    let serialize_start = std::time::Instant::now();
-    let db_bytes = tree.build_pir_db();
-    let serialize_ms = serialize_start.elapsed().as_millis();
+    let build_start = std::time::Instant::now();
+    let (db_bytes, broadcast) = tree.build_pir_db_and_broadcast(anchor_height);
+    let build_ms = build_start.elapsed().as_millis();
 
     let setup_start = std::time::Instant::now();
     let engine_state = engine
         .setup(&db_bytes, scenario)
         .map_err(|e| ServerError::PirSetup(e.to_string()))?;
     let setup_ms = setup_start.elapsed().as_millis();
-
-    let broadcast_start = std::time::Instant::now();
-    let broadcast = tree.broadcast_data(anchor_height);
-    let broadcast_ms = broadcast_start.elapsed().as_millis();
 
     let metadata = WitnessMetadata {
         anchor_height,
@@ -84,9 +80,8 @@ fn rebuild_pir<P: PirEngine>(
 
     tracing::info!(
         total_ms = total_start.elapsed().as_millis() as u64,
-        serialize_ms = serialize_ms as u64,
+        build_ms = build_ms as u64,
         setup_ms = setup_ms as u64,
-        broadcast_ms = broadcast_ms as u64,
         db_bytes = db_bytes.len(),
         tree_size = metadata.tree_size,
         shards = metadata.populated_shards,

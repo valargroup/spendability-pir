@@ -287,38 +287,60 @@ impl CommitmentTreeDb {
 
     // ── Broadcast / PIR database ─────────────────────────────────────
 
-    /// Build the full broadcast payload at the given anchor height.
+    /// Build PIR database bytes and broadcast payload in a single pass.
     ///
-    /// Computes sub-shard roots once and derives shard roots from them,
-    /// avoiding redundant Sinsemilla hash work. Uses prefetched roots for
-    /// shards before the window.
-    pub fn broadcast_data(&self, anchor_height: u64) -> BroadcastData {
+    /// Iterates each sub-shard's leaves once, writing them into the PIR
+    /// database and simultaneously computing sub-shard roots + shard roots.
+    /// This avoids the O(8192 × 256) redundant Sinsemilla hashing that
+    /// separate `build_pir_db()` + `broadcast_data()` calls would incur.
+    pub fn build_pir_db_and_broadcast(&self, anchor_height: u64) -> (Vec<u8>, BroadcastData) {
         let window_start = self.window_start_shard();
         let window_count = self.window_shard_count();
         let n_shards = self.populated_shards();
+        let total = self.tree_size() as usize;
+        let empty_ss_root = self.empty_roots[SUBSHARD_HEIGHT];
 
         let mut cap_roots = Vec::with_capacity(n_shards as usize);
         let mut broadcast_ss = Vec::with_capacity(window_count as usize);
+        let mut db = Vec::with_capacity(L0_DB_BYTES);
 
-        for i in 0..n_shards {
-            if i < window_start {
-                let root = if (i as usize) < self.prefetched_shard_roots.len() {
-                    self.prefetched_shard_roots[i as usize]
-                } else {
-                    self.empty_roots[SHARD_HEIGHT]
-                };
-                cap_roots.push(root);
+        // Prefetched shard roots (before the window)
+        for i in 0..window_start {
+            let root = if (i as usize) < self.prefetched_shard_roots.len() {
+                self.prefetched_shard_roots[i as usize]
             } else {
-                let ss = self.subshard_roots(i);
-                let shard_root = self.complete_subtree_root(&ss, SUBSHARD_HEIGHT as u8);
-                cap_roots.push(shard_root);
-                if i < window_start + window_count {
-                    broadcast_ss.push(ShardSubRoots { roots: ss });
-                }
-            }
+                self.empty_roots[SHARD_HEIGHT]
+            };
+            cap_roots.push(root);
         }
 
-        BroadcastData {
+        // Window shards: iterate leaves once, build db + roots simultaneously
+        for i in 0..window_count {
+            let shard_idx = window_start + i;
+            let shard_global_start = (shard_idx as usize) * SHARD_LEAVES;
+            let mut ss_roots = Vec::with_capacity(SUBSHARDS_PER_SHARD);
+
+            for ss in 0..SUBSHARDS_PER_SHARD {
+                let leaves = self.subshard_leaves(shard_idx, ss as u8);
+                for leaf in &leaves {
+                    db.extend_from_slice(leaf);
+                }
+                let ss_global_start = shard_global_start + ss * SUBSHARD_LEAVES;
+                if ss_global_start >= total {
+                    ss_roots.push(empty_ss_root);
+                } else {
+                    ss_roots.push(self.complete_subtree_root(&leaves, 0));
+                }
+            }
+
+            let shard_root = self.complete_subtree_root(&ss_roots, SUBSHARD_HEIGHT as u8);
+            cap_roots.push(shard_root);
+            broadcast_ss.push(ShardSubRoots { roots: ss_roots });
+        }
+
+        db.resize(L0_DB_BYTES, 0u8);
+
+        let broadcast = BroadcastData {
             cap: CapData {
                 shard_roots: cap_roots,
             },
@@ -326,33 +348,22 @@ impl CommitmentTreeDb {
             window_start_shard: window_start,
             window_shard_count: window_count,
             anchor_height,
-        }
+        };
+
+        (db, broadcast)
+    }
+
+    /// Build the full broadcast payload at the given anchor height.
+    pub fn broadcast_data(&self, anchor_height: u64) -> BroadcastData {
+        self.build_pir_db_and_broadcast(anchor_height).1
     }
 
     /// Build the PIR database as row-major bytes.
     ///
     /// Each row is one sub-shard: 256 leaves × 32 bytes = 8,192 bytes.
-    /// Rows within the populated window contain leaf data (with empty-leaf
-    /// sentinels for positions beyond the frontier). Padding rows beyond the
-    /// window are zero-filled.
+    /// Padding rows beyond the window are zero-filled.
     pub fn build_pir_db(&self) -> Vec<u8> {
-        let window_start = self.window_start_shard();
-        let window_count = self.window_shard_count();
-
-        let mut db = Vec::with_capacity(L0_DB_BYTES);
-
-        for i in 0..window_count {
-            let shard_idx = window_start + i;
-            for ss in 0..SUBSHARDS_PER_SHARD {
-                let leaves = self.subshard_leaves(shard_idx, ss as u8);
-                for leaf in &leaves {
-                    db.extend_from_slice(leaf);
-                }
-            }
-        }
-
-        db.resize(L0_DB_BYTES, 0u8);
-        db
+        self.build_pir_db_and_broadcast(0).0
     }
 
     // ── Internal hashing ─────────────────────────────────────────────
