@@ -1,11 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
+    "shared/pir-types",
+    "shared/chain-ingest",
     "nullifier/spend-types",
     "nullifier/hashtable-pir",
     "nullifier/nf-ingest",
     "nullifier/spend-server",
     "nullifier/spend-client",
+    "witness/witness-types",
+    "witness/commitment-ingest",
 ]
 
 [profile.release]

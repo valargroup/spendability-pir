@@ -11,6 +11,30 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      nullifier: ${{ steps.filter.outputs.nullifier }}
+      witness: ${{ steps.filter.outputs.witness }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            shared:
+              - 'shared/**'
+              - 'proto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+            nullifier:
+              - 'nullifier/**'
+            witness:
+              - 'witness/**'
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -38,8 +62,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: cargo clippy --workspace --all-targets
 
-  test:
-    name: Test
+  test-nullifier:
+    name: Test (nullifier)
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.nullifier == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,14 +73,50 @@ jobs:
         with:
           toolchain: nightly-2025-03-15
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: nullifier
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo test --workspace
+      - run: >-
+          cargo test
+          -p pir-types
+          -p chain-ingest
+          -p spend-types
+          -p hashtable-pir
+          -p nf-ingest
+          -p spend-server
+          -p spend-client
+
+  test-witness:
+    name: Test (witness)
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-03-15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: witness
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: >-
+          cargo test
+          -p pir-types
+          -p chain-ingest
+          -p witness-types
+          -p commitment-ingest
 
   test-ypir:
     name: Test (YPIR)
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.nullifier == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
