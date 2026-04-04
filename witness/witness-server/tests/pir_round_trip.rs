@@ -140,7 +140,8 @@ async fn full_pir_round_trip() {
             "anchor height mismatch for {label}"
         );
         assert_eq!(
-            witness.anchor_root, tree_root,
+            witness.anchor_root,
+            tree_root,
             "\nwitness root mismatch for {label}!\n  \
              witness:  {}\n  tree:     {}\n\n\
              The YPIR round-trip corrupted or misrouted row data.",
