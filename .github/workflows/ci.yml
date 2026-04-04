@@ -106,7 +106,10 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: >-
+      # --lib skips integration tests (e.g. commitment-tree-db/tests/tree_correctness.rs),
+      # which hit mainnet lightwalletd and take minutes. Those run in test-tree-correctness.
+      - name: Unit tests (witness crates)
+        run: >-
           cargo test
           -p pir-types
           -p chain-ingest
@@ -115,6 +118,7 @@ jobs:
           -p commitment-tree-db
           -p witness-server
           -p witness-client
+          --lib
 
   test-tree-correctness:
     name: Test (tree correctness)
@@ -129,7 +133,7 @@ jobs:
           toolchain: nightly-2025-03-15
       - uses: Swatinem/rust-cache@v2
         with:
-          key: tree-correctness
+          key: witness
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
