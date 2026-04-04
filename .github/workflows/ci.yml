@@ -113,6 +113,7 @@ jobs:
           -p witness-types
           -p commitment-ingest
           -p commitment-tree-db
+          -p witness-server
 
   test-tree-correctness:
     name: Test (tree correctness)
@@ -136,6 +137,7 @@ jobs:
         run: >-
           cargo test
           -p commitment-tree-db
+          -p witness-server
           --test tree_correctness
           --release
           -- --nocapture

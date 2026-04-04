@@ -1,0 +1,36 @@
+[package]
+name = "witness-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "witness-server"
+path = "src/main.rs"
+required-features = ["ypir"]
+
+[features]
+default = []
+ypir = ["dep:ypir", "dep:spiral-rs"]
+
+[dependencies]
+witness-types = { path = "../witness-types" }
+commitment-tree-db = { path = "../commitment-tree-db" }
+commitment-ingest = { path = "../commitment-ingest" }
+chain-ingest = { path = "../../shared/chain-ingest" }
+pir-types = { path = "../../shared/pir-types" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arc-swap = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+ypir = { git = "https://github.com/valargroup/ypir.git", branch = "valar/artifact", default-features = false, features = ["server"], optional = true }
+spiral-rs = { git = "https://github.com/valargroup/spiral-rs.git", branch = "valar/avoid-avx512", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }

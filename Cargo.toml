@@ -11,6 +11,7 @@ members = [
     "witness/witness-types",
     "witness/commitment-ingest",
     "witness/commitment-tree-db",
+    "witness/witness-server",
 ]
 
 [profile.release]

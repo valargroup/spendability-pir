@@ -3238,6 +3238,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "witness-server"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "chain-ingest",
+ "clap",
+ "commitment-ingest",
+ "commitment-tree-db",
+ "pir-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "spiral-rs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "witness-types",
+ "ypir",
+]
+
+[[package]]
 name = "witness-types"
 version = "0.1.0"
 dependencies = [
