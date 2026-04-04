@@ -7,7 +7,9 @@ use commitment_tree_db::CommitmentTreeDb;
 use pir_types::{PirEngine, ServerPhase, NU5_MAINNET_ACTIVATION};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use witness_types::WitnessChainEvent;
+use witness_types::{WitnessChainEvent, L0_MAX_SHARDS, SHARD_LEAVES};
+
+const ORCHARD_PROTOCOL: i32 = 1;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
@@ -19,6 +21,14 @@ pub enum ServerError {
     PirSetup(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("chain client error: {0}")]
+    Client(Box<chain_ingest::ClientError>),
+}
+
+impl From<chain_ingest::ClientError> for ServerError {
+    fn from(e: chain_ingest::ClientError) -> Self {
+        ServerError::Client(Box::new(e))
+    }
 }
 
 impl From<commitment_ingest::ingest::IngestError> for ServerError {
@@ -49,19 +59,15 @@ fn rebuild_pir<P: PirEngine>(
 ) -> std::result::Result<PirState<P>, ServerError> {
     let total_start = std::time::Instant::now();
 
-    let serialize_start = std::time::Instant::now();
-    let db_bytes = tree.build_pir_db();
-    let serialize_ms = serialize_start.elapsed().as_millis();
+    let build_start = std::time::Instant::now();
+    let (db_bytes, broadcast) = tree.build_pir_db_and_broadcast(anchor_height);
+    let build_ms = build_start.elapsed().as_millis();
 
     let setup_start = std::time::Instant::now();
     let engine_state = engine
         .setup(&db_bytes, scenario)
         .map_err(|e| ServerError::PirSetup(e.to_string()))?;
     let setup_ms = setup_start.elapsed().as_millis();
-
-    let broadcast_start = std::time::Instant::now();
-    let broadcast = tree.broadcast_data(anchor_height);
-    let broadcast_ms = broadcast_start.elapsed().as_millis();
 
     let metadata = WitnessMetadata {
         anchor_height,
@@ -74,12 +80,15 @@ fn rebuild_pir<P: PirEngine>(
 
     tracing::info!(
         total_ms = total_start.elapsed().as_millis() as u64,
-        serialize_ms = serialize_ms as u64,
+        build_ms = build_ms as u64,
         setup_ms = setup_ms as u64,
-        broadcast_ms = broadcast_ms as u64,
         db_bytes = db_bytes.len(),
         tree_size = metadata.tree_size,
         shards = metadata.populated_shards,
+        window = format_args!(
+            "{}..+{}",
+            metadata.window_start_shard, metadata.window_shard_count
+        ),
         anchor_height,
         "pir rebuild complete",
     );
@@ -89,6 +98,64 @@ fn rebuild_pir<P: PirEngine>(
         broadcast,
         metadata,
     })
+}
+
+/// Determine the sync start point using GetSubtreeRoots.
+///
+/// Returns `(CommitmentTreeDb, sync_from_height, initial_tree_size)`.
+/// If there are enough completed shards, creates a windowed tree with
+/// prefetched roots and syncs only the window. Otherwise syncs from NU5.
+async fn prepare_tree(
+    client: &mut chain_ingest::LwdClient,
+    tip_height: u64,
+) -> Result<(CommitmentTreeDb, u64, Option<u32>)> {
+    let subtree_roots = client.get_subtree_roots(ORCHARD_PROTOCOL, 0, 65535).await?;
+    let num_completed = subtree_roots.len();
+
+    tracing::info!(
+        completed_shards = num_completed,
+        "fetched subtree roots from lightwalletd"
+    );
+
+    if num_completed >= L0_MAX_SHARDS {
+        // Window: keep the last (L0_MAX_SHARDS - 1) completed shards + frontier
+        let window_start = num_completed - (L0_MAX_SHARDS - 1);
+        let leaf_offset = (window_start as u64) * (SHARD_LEAVES as u64);
+
+        let prefetched: Vec<[u8; 32]> = subtree_roots[..window_start]
+            .iter()
+            .map(|sr| {
+                let mut root = [0u8; 32];
+                let len = sr.root_hash.len().min(32);
+                root[..len].copy_from_slice(&sr.root_hash[..len]);
+                root
+            })
+            .collect();
+
+        let sync_from = subtree_roots[window_start - 1].completing_block_height + 1;
+        let initial_tree_size = Some(leaf_offset as u32);
+
+        tracing::info!(
+            window_start_shard = window_start,
+            prefetched_roots = prefetched.len(),
+            sync_from,
+            leaf_offset,
+            "using windowed sync (skipping {} shards)",
+            window_start,
+        );
+
+        let tree = CommitmentTreeDb::with_offset(leaf_offset, prefetched);
+        Ok((tree, sync_from, initial_tree_size))
+    } else {
+        let floor = min_sync_height(tip_height);
+        tracing::info!(
+            completed_shards = num_completed,
+            sync_from = floor,
+            "full sync from NU5 (fewer than {} completed shards)",
+            L0_MAX_SHARDS,
+        );
+        Ok((CommitmentTreeDb::new(), floor, None))
+    }
 }
 
 /// Lowest block height we'll ever sync.
@@ -106,17 +173,12 @@ async fn sync_range(
     from: u64,
     to: u64,
     tree: &mut CommitmentTreeDb,
+    initial_tree_size: Option<u32>,
     phase: &arc_swap::ArcSwap<ServerPhase>,
 ) -> Result<()> {
     if from > to {
         return Ok(());
     }
-
-    let initial_tree_size = if tree.tree_size() > 0 {
-        Some(tree.tree_size() as u32)
-    } else {
-        None
-    };
 
     let (tx, mut rx) = mpsc::channel::<WitnessChainEvent>(1000);
     let sync_handle = {
@@ -172,25 +234,29 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
         .await
         .map_err(commitment_ingest::ingest::IngestError::from)?;
 
-    let (mut tree, from_snapshot) = match snapshot_io::load_snapshot(&config.data_dir).await {
-        Ok(t) => {
-            let resume = t.latest_height().map(|h| h + 1).unwrap_or(0);
-            tracing::info!(
-                resume_height = resume,
-                tree_size = t.tree_size(),
-                "loaded snapshot"
-            );
-            (t, true)
-        }
-        Err(_) => (CommitmentTreeDb::new(), false),
-    };
-
-    let floor = min_sync_height(tip_height);
-    let forward_start = if from_snapshot {
-        tree.latest_height().map(|h| h + 1).unwrap_or(tip_height)
-    } else {
-        floor
-    };
+    // Try loading from snapshot first
+    let (mut tree, forward_start, initial_tree_size) =
+        match snapshot_io::load_snapshot(&config.data_dir).await {
+            Ok(t) => {
+                let resume = t.latest_height().map(|h| h + 1).unwrap_or(0);
+                let ts = if t.tree_size() > 0 {
+                    Some(t.tree_size() as u32)
+                } else {
+                    None
+                };
+                tracing::info!(
+                    resume_height = resume,
+                    tree_size = t.tree_size(),
+                    leaf_offset = t.leaf_offset(),
+                    "loaded snapshot"
+                );
+                (t, resume, ts)
+            }
+            Err(_) => {
+                // No snapshot — use GetSubtreeRoots for smart sync
+                prepare_tree(&mut client, tip_height).await?
+            }
+        };
 
     if forward_start <= tip_height {
         app_state.phase.store(Arc::new(ServerPhase::Syncing {
@@ -203,6 +269,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
             forward_start,
             tip_height,
             &mut tree,
+            initial_tree_size,
             &app_state.phase,
         )
         .await?;
@@ -211,6 +278,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     tracing::info!(
         tree_size = tree.tree_size(),
         shards = tree.populated_shards(),
+        window_start = tree.window_start_shard(),
         latest_height = tree.latest_height(),
         "sync complete",
     );
@@ -227,7 +295,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     // Follow mode
     let latest_height = tree.latest_height().unwrap_or(0);
     let latest_hash = tree.latest_block_hash().unwrap_or([0u8; 32]);
-    let initial_tree_size = if tree.tree_size() > 0 {
+    let follow_tree_size = if tree.tree_size() > 0 {
         Some(tree.tree_size() as u32)
     } else {
         None
@@ -238,7 +306,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
         let mut follow_client = chain_ingest::LwdClient::connect(&config.lwd_urls)
             .await
             .map_err(commitment_ingest::ingest::IngestError::from)?;
-        let ts = initial_tree_size;
+        let ts = follow_tree_size;
         tokio::spawn(async move {
             commitment_ingest::ingest::follow(
                 &mut follow_client,
@@ -292,8 +360,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     Ok(())
 }
 
-/// Simplified runner for testing: runs sync, builds PIR, returns the app state
-/// without entering the follow loop.
+/// Simplified runner for testing: runs sync, builds PIR, returns the app state.
 pub async fn run_sync_only<P: PirEngine + 'static>(
     config: ServerConfig,
     engine: Arc<P>,
@@ -309,17 +376,19 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
         .await
         .map_err(commitment_ingest::ingest::IngestError::from)?;
 
-    let (mut tree, from_snapshot) = match snapshot_io::load_snapshot(&config.data_dir).await {
-        Ok(t) => (t, true),
-        Err(_) => (CommitmentTreeDb::new(), false),
-    };
-
-    let floor = min_sync_height(tip_height);
-    let forward_start = if from_snapshot {
-        tree.latest_height().map(|h| h + 1).unwrap_or(tip_height)
-    } else {
-        floor
-    };
+    let (mut tree, forward_start, initial_tree_size) =
+        match snapshot_io::load_snapshot(&config.data_dir).await {
+            Ok(t) => {
+                let resume = t.latest_height().map(|h| h + 1).unwrap_or(0);
+                let ts = if t.tree_size() > 0 {
+                    Some(t.tree_size() as u32)
+                } else {
+                    None
+                };
+                (t, resume, ts)
+            }
+            Err(_) => prepare_tree(&mut client, tip_height).await?,
+        };
 
     if forward_start <= tip_height {
         app_state.phase.store(Arc::new(ServerPhase::Syncing {
@@ -331,6 +400,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
             forward_start,
             tip_height,
             &mut tree,
+            initial_tree_size,
             &app_state.phase,
         )
         .await?;

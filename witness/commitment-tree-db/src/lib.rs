@@ -4,6 +4,13 @@
 //! Computes shard roots, sub-shard roots, and serializes PIR database rows
 //! using protocol-correct Sinsemilla hashing via [`MerkleHashOrchard`].
 //!
+//! # Windowed mode
+//!
+//! When constructed via [`CommitmentTreeDb::with_offset`], only leaves within
+//! the PIR window are stored. Shard roots for earlier shards are provided via
+//! `prefetched_shard_roots` (from lightwalletd's `GetSubtreeRoots`), avoiding
+//! the need to sync the entire chain from NU5 activation.
+//!
 //! # Operations
 //!
 //! - [`CommitmentTreeDb::append_commitments`] — extend the tree with a block's commitments
@@ -41,18 +48,27 @@ pub enum TreeError {
 
 /// In-memory Orchard note commitment tree.
 ///
-/// Stores all leaf commitments within the PIR window and per-block metadata for
+/// Stores leaf commitments within the PIR window and per-block metadata for
 /// rollback. Hash computations use [`MerkleHashOrchard`] (Sinsemilla) with
 /// level-dependent empty-subtree sentinels from the Orchard protocol.
+///
+/// In windowed mode (`leaf_offset > 0`), leaves before the window are not
+/// stored; their shard roots come from `prefetched_shard_roots`.
 pub struct CommitmentTreeDb {
-    /// Leaf commitments in append order. `leaves[i]` = commitment at position `i`.
+    /// Leaf commitments in append order. `leaves[i]` corresponds to global
+    /// tree position `leaf_offset + i`.
     leaves: Vec<Hash>,
     /// Per-block records ordered by height, for rollback support.
     blocks: Vec<BlockRecord>,
     /// Precomputed empty subtree roots for levels `0..=TREE_DEPTH`.
-    /// `empty_roots[k]` is the root of an all-empty subtree whose leaves sit at
-    /// level `k` (equivalently, `MerkleHashOrchard::empty_root(Level::from(k))`).
     empty_roots: Vec<Hash>,
+    /// Global tree position of `leaves[0]`. Zero for full trees, non-zero
+    /// when only storing leaves within the PIR window.
+    leaf_offset: u64,
+    /// Shard roots for shards before the window, obtained from lightwalletd's
+    /// `GetSubtreeRoots`. Indexed 0..N where shard `i` in the global tree
+    /// maps to `prefetched_shard_roots[i]`.
+    prefetched_shard_roots: Vec<Hash>,
 }
 
 impl CommitmentTreeDb {
@@ -61,12 +77,34 @@ impl CommitmentTreeDb {
             leaves: Vec::new(),
             blocks: Vec::new(),
             empty_roots: precompute_empty_roots(),
+            leaf_offset: 0,
+            prefetched_shard_roots: Vec::new(),
         }
     }
 
-    /// Total number of leaves appended to the tree.
+    /// Create a tree that only stores leaves starting at `leaf_offset`.
+    ///
+    /// `prefetched_shard_roots` contains shard roots for all shards before the
+    /// window (shards `0..window_start_shard`), typically from `GetSubtreeRoots`.
+    /// `leaf_offset` must be shard-aligned (`leaf_offset % SHARD_LEAVES == 0`).
+    pub fn with_offset(leaf_offset: u64, prefetched_shard_roots: Vec<Hash>) -> Self {
+        debug_assert_eq!(
+            leaf_offset as usize % SHARD_LEAVES,
+            0,
+            "leaf_offset must be shard-aligned"
+        );
+        Self {
+            leaves: Vec::new(),
+            blocks: Vec::new(),
+            empty_roots: precompute_empty_roots(),
+            leaf_offset,
+            prefetched_shard_roots,
+        }
+    }
+
+    /// Total number of leaves in the global tree (offset + local leaves).
     pub fn tree_size(&self) -> u64 {
-        self.leaves.len() as u64
+        self.leaf_offset + self.leaves.len() as u64
     }
 
     /// Height of the most recently ingested block, if any.
@@ -79,23 +117,44 @@ impl CommitmentTreeDb {
         self.blocks.last().map(|b| b.hash)
     }
 
-    /// Number of populated shards (completed + frontier).
+    /// Number of populated shards in the global tree (completed + frontier).
     pub fn populated_shards(&self) -> u32 {
-        if self.leaves.is_empty() {
+        let total = self.tree_size();
+        if total == 0 {
             0
         } else {
-            ((self.leaves.len() - 1) / SHARD_LEAVES + 1) as u32
+            ((total as usize - 1) / SHARD_LEAVES + 1) as u32
         }
     }
 
-    /// First shard index in the PIR window (always 0 in v1).
+    /// First shard index in the PIR window.
     pub fn window_start_shard(&self) -> u32 {
-        0
+        (self.leaf_offset as usize / SHARD_LEAVES) as u32
+    }
+
+    /// Number of shards with local leaf data (window shards).
+    fn local_shard_count(&self) -> u32 {
+        if self.leaves.is_empty() {
+            return 0;
+        }
+        let first_local_shard = self.window_start_shard();
+        let last_local_shard = ((self.tree_size() as usize - 1) / SHARD_LEAVES) as u32;
+        last_local_shard - first_local_shard + 1
     }
 
     /// Number of shards in the PIR window (capped at [`L0_MAX_SHARDS`]).
     pub fn window_shard_count(&self) -> u32 {
-        self.populated_shards().min(L0_MAX_SHARDS as u32)
+        self.local_shard_count().min(L0_MAX_SHARDS as u32)
+    }
+
+    /// Global leaf offset.
+    pub fn leaf_offset(&self) -> u64 {
+        self.leaf_offset
+    }
+
+    /// Pre-fetched shard roots for shards before the window.
+    pub fn prefetched_shard_roots(&self) -> &[Hash] {
+        &self.prefetched_shard_roots
     }
 
     /// Block records (for snapshot serialization).
@@ -144,17 +203,22 @@ impl CommitmentTreeDb {
 
     /// Retrieve the 256 leaf commitments for a sub-shard.
     ///
+    /// The shard must be within the local window (`>= window_start_shard`).
     /// Positions beyond the tree's current frontier are filled with
     /// `MerkleHashOrchard::empty_root(Level::from(0))` (the empty leaf
     /// sentinel), **not** zero bytes.
     pub fn subshard_leaves(&self, shard_idx: u32, subshard_idx: u8) -> Vec<Hash> {
-        let start = (shard_idx as usize) * SHARD_LEAVES + (subshard_idx as usize) * SUBSHARD_LEAVES;
+        let global_start =
+            (shard_idx as usize) * SHARD_LEAVES + (subshard_idx as usize) * SUBSHARD_LEAVES;
         let empty_leaf = self.empty_roots[0];
         (0..SUBSHARD_LEAVES)
             .map(|i| {
-                let pos = start + i;
-                if pos < self.leaves.len() {
-                    self.leaves[pos]
+                let global_pos = global_start + i;
+                let local_pos = global_pos as u64 - self.leaf_offset;
+                if global_pos >= self.leaf_offset as usize
+                    && (local_pos as usize) < self.leaves.len()
+                {
+                    self.leaves[local_pos as usize]
                 } else {
                     empty_leaf
                 }
@@ -164,16 +228,18 @@ impl CommitmentTreeDb {
 
     /// Compute the 256 sub-shard roots for a given shard.
     ///
+    /// The shard must be within the local window.
     /// Sub-shards entirely beyond the tree frontier use the precomputed
     /// `empty_root(SUBSHARD_HEIGHT)` without recomputing Sinsemilla hashes.
     pub fn subshard_roots(&self, shard_idx: u32) -> Vec<Hash> {
-        let shard_start = (shard_idx as usize) * SHARD_LEAVES;
+        let shard_global_start = (shard_idx as usize) * SHARD_LEAVES;
         let empty_ss_root = self.empty_roots[SUBSHARD_HEIGHT];
+        let total = self.tree_size() as usize;
 
         (0..SUBSHARDS_PER_SHARD)
             .map(|ss| {
-                let ss_start = shard_start + ss * SUBSHARD_LEAVES;
-                if ss_start >= self.leaves.len() {
+                let ss_global_start = shard_global_start + ss * SUBSHARD_LEAVES;
+                if ss_global_start >= total {
                     return empty_ss_root;
                 }
                 let leaves = self.subshard_leaves(shard_idx, ss as u8);
@@ -184,14 +250,26 @@ impl CommitmentTreeDb {
 
     /// Compute shard roots for all populated shards.
     ///
-    /// Returns `(shard_index, root_hash)` pairs.
+    /// For shards before the window, returns pre-fetched roots. For window
+    /// shards, computes from leaf data.
     pub fn shard_roots(&self) -> Vec<(u32, Hash)> {
         let n = self.populated_shards();
+        let window_start = self.window_start_shard();
+
         (0..n)
             .map(|i| {
-                let ss_roots = self.subshard_roots(i);
-                let root = self.complete_subtree_root(&ss_roots, SUBSHARD_HEIGHT as u8);
-                (i, root)
+                if i < window_start {
+                    let root = if (i as usize) < self.prefetched_shard_roots.len() {
+                        self.prefetched_shard_roots[i as usize]
+                    } else {
+                        self.empty_roots[SHARD_HEIGHT]
+                    };
+                    (i, root)
+                } else {
+                    let ss_roots = self.subshard_roots(i);
+                    let root = self.complete_subtree_root(&ss_roots, SUBSHARD_HEIGHT as u8);
+                    (i, root)
+                }
             })
             .collect()
     }
@@ -200,7 +278,7 @@ impl CommitmentTreeDb {
     ///
     /// For an empty tree, returns `empty_root(TREE_DEPTH)`.
     pub fn tree_root(&self) -> Hash {
-        if self.leaves.is_empty() {
+        if self.tree_size() == 0 {
             return self.empty_roots[TREE_DEPTH];
         }
         let shard_roots: Vec<Hash> = self.shard_roots().into_iter().map(|(_, h)| h).collect();
@@ -209,28 +287,60 @@ impl CommitmentTreeDb {
 
     // ── Broadcast / PIR database ─────────────────────────────────────
 
-    /// Build the full broadcast payload at the given anchor height.
+    /// Build PIR database bytes and broadcast payload in a single pass.
     ///
-    /// Computes sub-shard roots once and derives shard roots from them,
-    /// avoiding redundant Sinsemilla hash work.
-    pub fn broadcast_data(&self, anchor_height: u64) -> BroadcastData {
+    /// Iterates each sub-shard's leaves once, writing them into the PIR
+    /// database and simultaneously computing sub-shard roots + shard roots.
+    /// This avoids the O(8192 × 256) redundant Sinsemilla hashing that
+    /// separate `build_pir_db()` + `broadcast_data()` calls would incur.
+    pub fn build_pir_db_and_broadcast(&self, anchor_height: u64) -> (Vec<u8>, BroadcastData) {
         let window_start = self.window_start_shard();
         let window_count = self.window_shard_count();
         let n_shards = self.populated_shards();
+        let total = self.tree_size() as usize;
+        let empty_ss_root = self.empty_roots[SUBSHARD_HEIGHT];
 
         let mut cap_roots = Vec::with_capacity(n_shards as usize);
         let mut broadcast_ss = Vec::with_capacity(window_count as usize);
+        let mut db = Vec::with_capacity(L0_DB_BYTES);
 
-        for i in 0..n_shards {
-            let ss = self.subshard_roots(i);
-            let shard_root = self.complete_subtree_root(&ss, SUBSHARD_HEIGHT as u8);
-            cap_roots.push(shard_root);
-            if i >= window_start && i < window_start + window_count {
-                broadcast_ss.push(ShardSubRoots { roots: ss });
-            }
+        // Prefetched shard roots (before the window)
+        for i in 0..window_start {
+            let root = if (i as usize) < self.prefetched_shard_roots.len() {
+                self.prefetched_shard_roots[i as usize]
+            } else {
+                self.empty_roots[SHARD_HEIGHT]
+            };
+            cap_roots.push(root);
         }
 
-        BroadcastData {
+        // Window shards: iterate leaves once, build db + roots simultaneously
+        for i in 0..window_count {
+            let shard_idx = window_start + i;
+            let shard_global_start = (shard_idx as usize) * SHARD_LEAVES;
+            let mut ss_roots = Vec::with_capacity(SUBSHARDS_PER_SHARD);
+
+            for ss in 0..SUBSHARDS_PER_SHARD {
+                let leaves = self.subshard_leaves(shard_idx, ss as u8);
+                for leaf in &leaves {
+                    db.extend_from_slice(leaf);
+                }
+                let ss_global_start = shard_global_start + ss * SUBSHARD_LEAVES;
+                if ss_global_start >= total {
+                    ss_roots.push(empty_ss_root);
+                } else {
+                    ss_roots.push(self.complete_subtree_root(&leaves, 0));
+                }
+            }
+
+            let shard_root = self.complete_subtree_root(&ss_roots, SUBSHARD_HEIGHT as u8);
+            cap_roots.push(shard_root);
+            broadcast_ss.push(ShardSubRoots { roots: ss_roots });
+        }
+
+        db.resize(L0_DB_BYTES, 0u8);
+
+        let broadcast = BroadcastData {
             cap: CapData {
                 shard_roots: cap_roots,
             },
@@ -238,42 +348,27 @@ impl CommitmentTreeDb {
             window_start_shard: window_start,
             window_shard_count: window_count,
             anchor_height,
-        }
+        };
+
+        (db, broadcast)
+    }
+
+    /// Build the full broadcast payload at the given anchor height.
+    pub fn broadcast_data(&self, anchor_height: u64) -> BroadcastData {
+        self.build_pir_db_and_broadcast(anchor_height).1
     }
 
     /// Build the PIR database as row-major bytes.
     ///
     /// Each row is one sub-shard: 256 leaves × 32 bytes = 8,192 bytes.
-    /// Rows within the populated window contain leaf data (with empty-leaf
-    /// sentinels for positions beyond the frontier). Padding rows beyond the
-    /// window are zero-filled.
+    /// Padding rows beyond the window are zero-filled.
     pub fn build_pir_db(&self) -> Vec<u8> {
-        let window_start = self.window_start_shard();
-        let window_count = self.window_shard_count();
-
-        let mut db = Vec::with_capacity(L0_DB_BYTES);
-
-        for i in 0..window_count {
-            let shard_idx = window_start + i;
-            for ss in 0..SUBSHARDS_PER_SHARD {
-                let leaves = self.subshard_leaves(shard_idx, ss as u8);
-                for leaf in &leaves {
-                    db.extend_from_slice(leaf);
-                }
-            }
-        }
-
-        db.resize(L0_DB_BYTES, 0u8);
-        db
+        self.build_pir_db_and_broadcast(0).0
     }
 
     // ── Internal hashing ─────────────────────────────────────────────
 
     /// Root of a complete binary subtree from exactly `2^k` leaves.
-    ///
-    /// `base_level` is the Merkle combine level of the leaf nodes: leaves are
-    /// at level `base_level`, and `combine(base_level, left, right)` produces
-    /// a node at level `base_level + 1`.
     fn complete_subtree_root(&self, leaves: &[Hash], base_level: u8) -> Hash {
         debug_assert!(leaves.len().is_power_of_two());
         if leaves.len() == 1 {
@@ -294,9 +389,6 @@ impl CommitmentTreeDb {
 
     /// Root of a sparse subtree where `populated` leaves are left-packed and
     /// positions beyond `populated.len()` are empty.
-    ///
-    /// `capacity` must be a power of two (total leaf slots in the subtree).
-    /// `base_level` is the combine level of the leaves.
     fn sparse_subtree_root(&self, populated: &[Hash], capacity: usize, base_level: u8) -> Hash {
         debug_assert!(capacity.is_power_of_two());
         self.sparse_root_rec(populated, 0, capacity, base_level)
@@ -335,9 +427,6 @@ impl Default for CommitmentTreeDb {
 // ── Free functions ───────────────────────────────────────────────────
 
 /// Precompute empty subtree roots for levels `0..=TREE_DEPTH`.
-///
-/// `empty_roots[0]` = `MerkleHashOrchard::empty_leaf()` (the empty leaf sentinel).
-/// `empty_roots[k]` = `combine(k-1, empty_roots[k-1], empty_roots[k-1])`.
 fn precompute_empty_roots() -> Vec<Hash> {
     let mut roots = Vec::with_capacity(TREE_DEPTH + 1);
     let empty_leaf = MerkleHashOrchard::empty_leaf();
@@ -370,9 +459,6 @@ mod tests {
     use super::*;
 
     fn make_leaf(byte: u8) -> Hash {
-        // Use the empty_leaf serialized form as a base, but for distinct test
-        // leaves we just need valid field elements. The simplest valid field
-        // element is a small integer encoded in LE.
         let mut h = [0u8; 32];
         h[0] = byte;
         h
@@ -384,7 +470,6 @@ mod tests {
         let root = tree.tree_root();
         assert_eq!(root, tree.empty_roots[TREE_DEPTH]);
 
-        // Verify it matches MerkleHashOrchard::empty_root(32)
         let expected = <MerkleHashOrchard as Hashable>::empty_root(Level::from(TREE_DEPTH as u8));
         assert_eq!(root, expected.to_bytes());
     }
@@ -434,7 +519,6 @@ mod tests {
     #[test]
     fn subshard_leaves_padding() {
         let mut tree = CommitmentTreeDb::new();
-        // Append 3 leaves — sub-shard 0 of shard 0 should have 3 real + 253 empty
         tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2), make_leaf(3)]);
 
         let leaves = tree.subshard_leaves(0, 0);
@@ -477,7 +561,6 @@ mod tests {
     #[test]
     fn shard_root_of_empty_shard() {
         let tree = CommitmentTreeDb::new();
-        // 256 empty sub-shard roots → shard root
         let ss_roots: Vec<Hash> = (0..SUBSHARDS_PER_SHARD)
             .map(|_| tree.empty_roots[SUBSHARD_HEIGHT])
             .collect();
@@ -520,31 +603,24 @@ mod tests {
         let leaf_b = make_leaf(20);
         tree.append_commitments(100, [1u8; 32], &[leaf_a, leaf_b]);
 
-        // Manually compute: hash(level=0, a, b) gives the sub-sub-pair,
-        // then padding with empty roots up to level 32
         let pair_hash = hash_combine(0, &leaf_a, &leaf_b);
         let empty_leaf = tree.empty_roots[0];
         let empty_pair = hash_combine(0, &empty_leaf, &empty_leaf);
         assert_eq!(empty_pair, tree.empty_roots[1]);
 
-        // At level 1: combine(pair_hash, empty_root(1))
         let level1 = hash_combine(1, &pair_hash, &tree.empty_roots[1]);
 
-        // At level 2..7: combine with empty_root(k) at each level
         let mut current = level1;
         for k in 2..SUBSHARD_HEIGHT {
             current = hash_combine(k as u8, &current, &tree.empty_roots[k]);
         }
-        // current is now the sub-shard root (level 8)
 
-        // Verify sub-shard root
         let ss_roots = tree.subshard_roots(0);
         assert_eq!(
             ss_roots[0], current,
             "sub-shard 0 root must match manual computation"
         );
 
-        // All other sub-shard roots should be empty_root(8)
         for ss in &ss_roots[1..] {
             assert_eq!(*ss, tree.empty_roots[SUBSHARD_HEIGHT]);
         }
@@ -575,7 +651,6 @@ mod tests {
         tree.append_commitments(100, [1u8; 32], &[leaf]);
         let db = tree.build_pir_db();
 
-        // First 32 bytes should be the leaf
         assert_eq!(&db[..32], &leaf[..]);
     }
 
@@ -662,5 +737,71 @@ mod tests {
         assert_eq!(tree.tree_size(), size_before);
         assert_eq!(tree.tree_root(), root_before);
         assert_eq!(tree.latest_height(), Some(101));
+    }
+
+    // ── Windowed (offset) tests ──────────────────────────────────────
+
+    #[test]
+    fn with_offset_basic() {
+        let prefetched = vec![[0xAA; 32]; 5];
+        let offset = 5 * SHARD_LEAVES as u64;
+        let tree = CommitmentTreeDb::with_offset(offset, prefetched.clone());
+
+        assert_eq!(tree.tree_size(), offset);
+        assert_eq!(tree.leaf_offset(), offset);
+        assert_eq!(tree.window_start_shard(), 5);
+        assert_eq!(tree.populated_shards(), 5);
+        assert_eq!(tree.prefetched_shard_roots().len(), 5);
+    }
+
+    #[test]
+    fn with_offset_append_and_broadcast() {
+        let prefetched = vec![[0xAA; 32]; 2];
+        let offset = 2 * SHARD_LEAVES as u64;
+        let mut tree = CommitmentTreeDb::with_offset(offset, prefetched.clone());
+
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        assert_eq!(tree.tree_size(), offset + 2);
+        assert_eq!(tree.populated_shards(), 3);
+        assert_eq!(tree.window_start_shard(), 2);
+        assert_eq!(tree.window_shard_count(), 1);
+
+        let bd = tree.broadcast_data(100);
+        assert_eq!(bd.cap.shard_roots.len(), 3);
+        assert_eq!(bd.cap.shard_roots[0], [0xAA; 32]);
+        assert_eq!(bd.cap.shard_roots[1], [0xAA; 32]);
+        assert_eq!(bd.window_start_shard, 2);
+        assert_eq!(bd.window_shard_count, 1);
+        assert_eq!(bd.subshard_roots.len(), 1);
+    }
+
+    #[test]
+    fn with_offset_shard_roots_combines_prefetched_and_computed() {
+        let prefetched = vec![[0xBB; 32]; 3];
+        let offset = 3 * SHARD_LEAVES as u64;
+        let mut tree = CommitmentTreeDb::with_offset(offset, prefetched);
+
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+
+        let roots = tree.shard_roots();
+        assert_eq!(roots.len(), 4);
+        assert_eq!(roots[0], (0, [0xBB; 32]));
+        assert_eq!(roots[1], (1, [0xBB; 32]));
+        assert_eq!(roots[2], (2, [0xBB; 32]));
+        assert_ne!(roots[3].1, [0xBB; 32]);
+    }
+
+    #[test]
+    fn with_offset_pir_db_starts_at_window() {
+        let prefetched = vec![[0xCC; 32]; 2];
+        let offset = 2 * SHARD_LEAVES as u64;
+        let mut tree = CommitmentTreeDb::with_offset(offset, prefetched);
+
+        let leaf = make_leaf(0xDD);
+        tree.append_commitments(100, [1u8; 32], &[leaf]);
+
+        let db = tree.build_pir_db();
+        assert_eq!(db.len(), L0_DB_BYTES);
+        assert_eq!(&db[..32], &leaf[..]);
     }
 }
