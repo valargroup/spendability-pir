@@ -147,6 +147,41 @@ jobs:
           --release
           -- --nocapture
 
+  test-pir-round-trip:
+    name: Test (PIR round-trip)
+    needs: changes
+    if: github.event_name == 'push' && (needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PIR_TEST_DATA_DIR: /tmp/pir-test-snapshot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-03-15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: pir-round-trip
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/pir-test-snapshot
+          key: pir-snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: pir-snapshot-${{ runner.os }}-
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: PIR round-trip test
+        run: >-
+          cargo test
+          -p witness-server
+          --test pir_round_trip
+          --features ypir
+          --release
+          -- --nocapture
+
   test-ypir:
     name: Test (YPIR)
     needs: changes
@@ -164,12 +199,12 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo test --workspace --all-features --release
+      - run: cargo test --workspace --all-features --release --lib
 
   notify-slack:
     name: Slack Notification
     if: ${{ always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && contains(join(needs.*.result, ','), 'failure') }}
-    needs: [fmt, clippy, test-nullifier, test-witness, test-tree-correctness, test-ypir]
+    needs: [fmt, clippy, test-nullifier, test-witness, test-tree-correctness, test-pir-round-trip, test-ypir]
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack on failure
@@ -196,7 +231,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nFormat: `${{ needs.fmt.result }}` | Clippy: `${{ needs.clippy.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
+                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nFormat: `${{ needs.fmt.result }}` | Clippy: `${{ needs.clippy.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | PIR: `${{ needs.test-pir-round-trip.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
                 }
               ]
             }

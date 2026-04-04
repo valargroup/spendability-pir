@@ -32,5 +32,7 @@ ypir = { git = "https://github.com/valargroup/ypir.git", branch = "valar/artifac
 spiral-rs = { git = "https://github.com/valargroup/spiral-rs.git", branch = "valar/avoid-avx512", optional = true }
 
 [dev-dependencies]
+witness-client = { path = "../witness-client" }
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
+hex = "0.4"

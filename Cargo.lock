@@ -3264,6 +3264,7 @@ dependencies = [
  "clap",
  "commitment-ingest",
  "commitment-tree-db",
+ "hex",
  "pir-types",
  "reqwest",
  "serde",
@@ -3275,6 +3276,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "witness-client",
  "witness-types",
  "ypir",
 ]
