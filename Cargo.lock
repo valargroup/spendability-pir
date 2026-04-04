@@ -430,10 +430,15 @@ dependencies = [
 name = "commitment-tree-db"
 version = "0.1.0"
 dependencies = [
+ "chain-ingest",
+ "commitment-ingest",
+ "hex",
  "incrementalmerkletree",
  "orchard",
  "thiserror",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
  "witness-types",
  "xxhash-rust",
 ]
