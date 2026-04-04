@@ -69,6 +69,10 @@ pub struct CommitmentTreeDb {
     /// `GetSubtreeRoots`. Indexed 0..N where shard `i` in the global tree
     /// maps to `prefetched_shard_roots[i]`.
     prefetched_shard_roots: Vec<Hash>,
+    /// Cached sub-shard roots indexed by local sub-shard position within the
+    /// window. `ss_root_cache[i]` = `Some(root)` if clean, `None` if dirty.
+    /// Length is always [`L0_DB_ROWS`] (8,192).
+    ss_root_cache: Vec<Option<Hash>>,
 }
 
 impl CommitmentTreeDb {
@@ -79,6 +83,7 @@ impl CommitmentTreeDb {
             empty_roots: precompute_empty_roots(),
             leaf_offset: 0,
             prefetched_shard_roots: Vec::new(),
+            ss_root_cache: vec![None; L0_DB_ROWS],
         }
     }
 
@@ -99,6 +104,7 @@ impl CommitmentTreeDb {
             empty_roots: precompute_empty_roots(),
             leaf_offset,
             prefetched_shard_roots,
+            ss_root_cache: vec![None; L0_DB_ROWS],
         }
     }
 
@@ -172,16 +178,32 @@ impl CommitmentTreeDb {
         &self.empty_roots
     }
 
+    /// Sub-shard root cache (for snapshot serialization).
+    pub fn ss_root_cache(&self) -> &[Option<Hash>] {
+        &self.ss_root_cache
+    }
+
     // ── Mutation ──────────────────────────────────────────────────────
 
     /// Append note commitments from a newly ingested block.
+    /// Invalidates only the sub-shard cache slots touched by the new leaves.
     pub fn append_commitments(&mut self, height: u64, hash: [u8; 32], commitments: &[Hash]) {
+        if !commitments.is_empty() {
+            let old_local_len = self.leaves.len();
+            self.leaves.extend_from_slice(commitments);
+            let new_local_len = self.leaves.len();
+
+            let first_dirty = old_local_len / SUBSHARD_LEAVES;
+            let last_dirty = (new_local_len - 1) / SUBSHARD_LEAVES;
+            for slot in first_dirty..=last_dirty.min(L0_DB_ROWS - 1) {
+                self.ss_root_cache[slot] = None;
+            }
+        }
         self.blocks.push(BlockRecord {
             height,
             hash,
             num_commitments: commitments.len() as u32,
         });
-        self.leaves.extend_from_slice(commitments);
     }
 
     /// Roll back all blocks with height strictly greater than `target_height`.
@@ -197,6 +219,11 @@ impl CommitmentTreeDb {
         }
         let new_len = self.leaves.len().saturating_sub(to_remove);
         self.leaves.truncate(new_len);
+
+        let frontier_slot = if new_len == 0 { 0 } else { (new_len - 1) / SUBSHARD_LEAVES };
+        for slot in frontier_slot..L0_DB_ROWS {
+            self.ss_root_cache[slot] = None;
+        }
     }
 
     // ── Leaf / root queries ──────────────────────────────────────────
@@ -293,7 +320,7 @@ impl CommitmentTreeDb {
     /// database and simultaneously computing sub-shard roots + shard roots.
     /// This avoids the O(8192 × 256) redundant Sinsemilla hashing that
     /// separate `build_pir_db()` + `broadcast_data()` calls would incur.
-    pub fn build_pir_db_and_broadcast(&self, anchor_height: u64) -> (Vec<u8>, BroadcastData) {
+    pub fn build_pir_db_and_broadcast(&mut self, anchor_height: u64) -> (Vec<u8>, BroadcastData) {
         let window_start = self.window_start_shard();
         let window_count = self.window_shard_count();
         let n_shards = self.populated_shards();
@@ -303,6 +330,8 @@ impl CommitmentTreeDb {
         let mut cap_roots = Vec::with_capacity(n_shards as usize);
         let mut broadcast_ss = Vec::with_capacity(window_count as usize);
         let mut db = Vec::with_capacity(L0_DB_BYTES);
+        let mut cache_hits: u32 = 0;
+        let mut cache_misses: u32 = 0;
 
         // Prefetched shard roots (before the window)
         for i in 0..window_start {
@@ -321,6 +350,7 @@ impl CommitmentTreeDb {
             let mut ss_roots = Vec::with_capacity(SUBSHARDS_PER_SHARD);
 
             for ss in 0..SUBSHARDS_PER_SHARD {
+                let cache_slot = (i as usize) * SUBSHARDS_PER_SHARD + ss;
                 let leaves = self.subshard_leaves(shard_idx, ss as u8);
                 for leaf in &leaves {
                     db.extend_from_slice(leaf);
@@ -328,8 +358,14 @@ impl CommitmentTreeDb {
                 let ss_global_start = shard_global_start + ss * SUBSHARD_LEAVES;
                 if ss_global_start >= total {
                     ss_roots.push(empty_ss_root);
+                } else if let Some(cached) = self.ss_root_cache[cache_slot] {
+                    ss_roots.push(cached);
+                    cache_hits += 1;
                 } else {
-                    ss_roots.push(self.complete_subtree_root(&leaves, 0));
+                    let root = self.complete_subtree_root(&leaves, 0);
+                    self.ss_root_cache[cache_slot] = Some(root);
+                    ss_roots.push(root);
+                    cache_misses += 1;
                 }
             }
 
@@ -339,6 +375,8 @@ impl CommitmentTreeDb {
         }
 
         db.resize(L0_DB_BYTES, 0u8);
+
+        tracing::info!(cache_hits, cache_misses, "subshard root cache stats");
 
         let broadcast = BroadcastData {
             cap: CapData {
@@ -354,7 +392,7 @@ impl CommitmentTreeDb {
     }
 
     /// Build the full broadcast payload at the given anchor height.
-    pub fn broadcast_data(&self, anchor_height: u64) -> BroadcastData {
+    pub fn broadcast_data(&mut self, anchor_height: u64) -> BroadcastData {
         self.build_pir_db_and_broadcast(anchor_height).1
     }
 
@@ -362,7 +400,7 @@ impl CommitmentTreeDb {
     ///
     /// Each row is one sub-shard: 256 leaves × 32 bytes = 8,192 bytes.
     /// Padding rows beyond the window are zero-filled.
-    pub fn build_pir_db(&self) -> Vec<u8> {
+    pub fn build_pir_db(&mut self) -> Vec<u8> {
         self.build_pir_db_and_broadcast(0).0
     }
 
@@ -656,7 +694,7 @@ mod tests {
 
     #[test]
     fn pir_db_padding_is_zero() {
-        let tree = CommitmentTreeDb::new();
+        let mut tree = CommitmentTreeDb::new();
         let db = tree.build_pir_db();
         assert_eq!(db.len(), L0_DB_BYTES);
         assert!(
@@ -803,5 +841,62 @@ mod tests {
         let db = tree.build_pir_db();
         assert_eq!(db.len(), L0_DB_BYTES);
         assert_eq!(&db[..32], &leaf[..]);
+    }
+
+    // ── Cache tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cache_warm_hit_produces_same_result() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        let (db1, bd1) = tree.build_pir_db_and_broadcast(100);
+        let (db2, bd2) = tree.build_pir_db_and_broadcast(100);
+        assert_eq!(db1, db2, "PIR db must be identical on warm cache hit");
+        assert_eq!(bd1.cap.shard_roots, bd2.cap.shard_roots);
+        for (a, b) in bd1.subshard_roots.iter().zip(bd2.subshard_roots.iter()) {
+            assert_eq!(a.roots, b.roots);
+        }
+        assert!(tree.ss_root_cache[0].is_some());
+    }
+
+    #[test]
+    fn cache_invalidated_on_append() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+        let (_, bd1) = tree.build_pir_db_and_broadcast(100);
+        assert!(tree.ss_root_cache[0].is_some());
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        assert!(tree.ss_root_cache[0].is_none(), "slot 0 must be invalidated");
+        let (_, bd2) = tree.build_pir_db_and_broadcast(101);
+        assert_ne!(bd1.cap.shard_roots[0], bd2.cap.shard_roots[0]);
+    }
+
+    #[test]
+    fn cache_invalidated_on_rollback() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        tree.build_pir_db_and_broadcast(101);
+        assert!(tree.ss_root_cache[0].is_some());
+        tree.rollback_to(100);
+        assert!(tree.ss_root_cache[0].is_none(), "cache must be invalidated on rollback");
+        let (_, bd) = tree.build_pir_db_and_broadcast(100);
+        assert_eq!(bd.cap.shard_roots.len(), 1);
+    }
+
+    #[test]
+    fn cache_only_invalidates_dirty_subshards() {
+        let mut tree = CommitmentTreeDb::new();
+        let leaves: Vec<Hash> = (0..SUBSHARD_LEAVES).map(|i| make_leaf(i as u8)).collect();
+        tree.append_commitments(100, [1u8; 32], &leaves);
+        tree.append_commitments(101, [2u8; 32], &leaves);
+        tree.build_pir_db_and_broadcast(101);
+        assert!(tree.ss_root_cache[0].is_some(), "slot 0 cached");
+        assert!(tree.ss_root_cache[1].is_some(), "slot 1 cached");
+        // Append one leaf -- only touches sub-shard 2
+        tree.append_commitments(102, [3u8; 32], &[make_leaf(0xFF)]);
+        assert!(tree.ss_root_cache[0].is_some(), "slot 0 must stay cached");
+        assert!(tree.ss_root_cache[1].is_some(), "slot 1 must stay cached");
+        assert!(tree.ss_root_cache[2].is_none(), "slot 2 must be invalidated");
     }
 }
