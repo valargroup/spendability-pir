@@ -5,7 +5,7 @@ use ypir::client::YPIRClient;
 use ypir::params::params_for_scenario_simplepir;
 use ypir::serialize::ToBytes;
 
-mod reconstruct;
+pub mod reconstruct;
 
 #[derive(Error, Debug)]
 pub enum WitnessClientError {
