@@ -136,7 +136,7 @@ async fn prepare_tree(
             })
             .collect();
 
-        let sync_from = subtree_roots[window_start - 1].completing_block_height as u64 + 1;
+        let sync_from = subtree_roots[window_start - 1].completing_block_height + 1;
         let initial_tree_size = Some(leaf_offset as u32);
 
         tracing::info!(
