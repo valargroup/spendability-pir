@@ -1,10 +1,10 @@
 //! Snapshot serialization and deserialization for [`CommitmentTreeDb`].
 //!
-//! Binary format v2 (all integers little-endian):
+//! Binary format v3 (all integers little-endian):
 //!
 //! | Field                 | Size     | Description                                    |
 //! |-----------------------|----------|------------------------------------------------|
-//! | magic                 | 8 bytes  | `0x434D_5452_4545_0002` (version 2)            |
+//! | magic                 | 8 bytes  | `0x434D_5452_4545_0003` (version 3)            |
 //! | tree_size             | 8 bytes  | Total global number of leaves                  |
 //! | block_count           | 8 bytes  | Number of block records                        |
 //! | latest_height         | 8 bytes  | Height of the most recent block (0 if empty)   |
@@ -14,17 +14,21 @@
 //! | prefetched_roots      | variable | `prefetched_count` × 32 bytes                   |
 //! | block_records         | variable | `block_count` × (height: 8, hash: 32, n_cmx: 4)|
 //! | leaf_data             | variable | `local_leaves` × 32 bytes                      |
+//! | cached_count          | 8 bytes  | Number of cached sub-shard root entries         |
+//! | cached_entries        | variable | `cached_count` × (slot: 4, root: 32)            |
 //! | checksum              | 8 bytes  | xxHash64 over everything preceding              |
 
 use crate::{BlockRecord, CommitmentTreeDb, TreeError};
+use witness_types::{Hash, L0_DB_ROWS};
 use xxhash_rust::xxh64::xxh64;
 
 const SNAPSHOT_MAGIC_V1: u64 = 0x434D_5452_4545_0001;
 const SNAPSHOT_MAGIC_V2: u64 = 0x434D_5452_4545_0002;
+const SNAPSHOT_MAGIC_V3: u64 = 0x434D_5452_4545_0003;
 const BLOCK_RECORD_SIZE: usize = 8 + 32 + 4; // height + hash + num_commitments
 
 impl CommitmentTreeDb {
-    /// Serialize the current tree state to a snapshot byte vector (v2 format).
+    /// Serialize the current tree state to a snapshot byte vector (v3 format).
     pub fn to_snapshot(&self) -> Vec<u8> {
         let block_count = self.blocks().len();
         let local_leaves = self.leaves().len();
@@ -43,7 +47,7 @@ impl CommitmentTreeDb {
         let mut buf = Vec::with_capacity(estimated);
 
         // Header
-        buf.extend_from_slice(&SNAPSHOT_MAGIC_V2.to_le_bytes());
+        buf.extend_from_slice(&SNAPSHOT_MAGIC_V3.to_le_bytes());
         buf.extend_from_slice(&self.tree_size().to_le_bytes());
         buf.extend_from_slice(&(block_count as u64).to_le_bytes());
 
@@ -70,6 +74,19 @@ impl CommitmentTreeDb {
         // Leaf data
         for leaf in self.leaves() {
             buf.extend_from_slice(leaf);
+        }
+
+        // Sub-shard root cache (v3)
+        let cached_entries: Vec<(u32, Hash)> = self
+            .ss_root_cache()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, opt)| opt.map(|root| (i as u32, root)))
+            .collect();
+        buf.extend_from_slice(&(cached_entries.len() as u64).to_le_bytes());
+        for (slot, root) in &cached_entries {
+            buf.extend_from_slice(&slot.to_le_bytes());
+            buf.extend_from_slice(root);
         }
 
         // Checksum
@@ -119,6 +136,7 @@ impl CommitmentTreeDb {
         match magic {
             SNAPSHOT_MAGIC_V1 => Self::from_snapshot_v1(payload, pos),
             SNAPSHOT_MAGIC_V2 => Self::from_snapshot_v2(payload, pos),
+            SNAPSHOT_MAGIC_V3 => Self::from_snapshot_v3(payload, pos),
             _ => Err(TreeError::SnapshotCorrupted {
                 reason: format!("bad magic: {magic:#018x}"),
             }),
@@ -219,6 +237,83 @@ impl CommitmentTreeDb {
         let mut tree = CommitmentTreeDb::with_offset(leaf_offset, prefetched_shard_roots);
         tree.leaves = leaves;
         tree.blocks = blocks;
+        Ok(tree)
+    }
+
+    fn from_snapshot_v3(payload: &[u8], mut pos: usize) -> Result<Self, TreeError> {
+        let read_u64 = |pos: &mut usize| -> Result<u64, TreeError> {
+            if *pos + 8 > payload.len() {
+                return Err(TreeError::SnapshotCorrupted {
+                    reason: "unexpected EOF reading u64".into(),
+                });
+            }
+            let val = u64::from_le_bytes(payload[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            Ok(val)
+        };
+
+        let tree_size = read_u64(&mut pos)? as usize;
+        let block_count = read_u64(&mut pos)? as usize;
+        let _latest_height = read_u64(&mut pos)?;
+
+        if pos + 32 > payload.len() {
+            return Err(TreeError::SnapshotCorrupted {
+                reason: "unexpected EOF reading latest_hash".into(),
+            });
+        }
+        pos += 32;
+
+        let leaf_offset = read_u64(&mut pos)?;
+        let prefetched_count = read_u64(&mut pos)? as usize;
+
+        let mut prefetched_shard_roots = Vec::with_capacity(prefetched_count);
+        for _ in 0..prefetched_count {
+            if pos + 32 > payload.len() {
+                return Err(TreeError::SnapshotCorrupted {
+                    reason: "prefetched roots truncated".into(),
+                });
+            }
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&payload[pos..pos + 32]);
+            pos += 32;
+            prefetched_shard_roots.push(root);
+        }
+
+        let (blocks, total_commitments) = Self::read_block_records(payload, &mut pos, block_count)?;
+        let local_leaves = tree_size - leaf_offset as usize;
+        if total_commitments != local_leaves {
+            return Err(TreeError::SnapshotCorrupted {
+                reason: format!(
+                    "block records sum to {total_commitments} but expected {local_leaves} local leaves"
+                ),
+            });
+        }
+
+        let leaves = Self::read_leaves(payload, &mut pos, local_leaves)?;
+
+        // Read sub-shard root cache
+        let cached_count = read_u64(&mut pos)? as usize;
+        let mut ss_root_cache = vec![None; L0_DB_ROWS];
+        for _ in 0..cached_count {
+            if pos + 4 + 32 > payload.len() {
+                return Err(TreeError::SnapshotCorrupted {
+                    reason: "cache entry truncated".into(),
+                });
+            }
+            let slot = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&payload[pos..pos + 32]);
+            pos += 32;
+            if slot < L0_DB_ROWS {
+                ss_root_cache[slot] = Some(root);
+            }
+        }
+
+        let mut tree = CommitmentTreeDb::with_offset(leaf_offset, prefetched_shard_roots);
+        tree.leaves = leaves;
+        tree.blocks = blocks;
+        tree.ss_root_cache = ss_root_cache;
         Ok(tree)
     }
 
@@ -347,6 +442,27 @@ mod tests {
         assert_eq!(restored.tree_size(), 2);
         assert_eq!(restored.latest_height(), Some(100));
         assert_ne!(restored.tree_root(), root_before);
+    }
+
+    #[test]
+    fn snapshot_preserves_cache() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [0xAA; 32], &[make_leaf(1), make_leaf(2)]);
+        tree.build_pir_db_and_broadcast(100);
+
+        // Cache should be warm for slot 0
+        assert!(tree.ss_root_cache()[0].is_some());
+        let cached_root = tree.ss_root_cache()[0].unwrap();
+
+        let snap = tree.to_snapshot();
+        let restored = CommitmentTreeDb::from_snapshot(&snap).unwrap();
+
+        assert!(
+            restored.ss_root_cache()[0].is_some(),
+            "cache must survive snapshot roundtrip"
+        );
+        assert_eq!(restored.ss_root_cache()[0].unwrap(), cached_root);
+        assert_eq!(restored.tree_size(), tree.tree_size());
     }
 
     #[test]

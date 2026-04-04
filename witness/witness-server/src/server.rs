@@ -53,7 +53,7 @@ pub fn build_router<P: PirEngine + 'static>(state: Arc<AppState<P>>) -> Router {
 /// Build PIR server state from the current commitment tree and store it.
 fn rebuild_pir<P: PirEngine>(
     engine: &P,
-    tree: &CommitmentTreeDb,
+    tree: &mut CommitmentTreeDb,
     scenario: &pir_types::YpirScenario,
     anchor_height: u64,
 ) -> std::result::Result<PirState<P>, ServerError> {
@@ -287,10 +287,14 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     tracing::info!("snapshot saved after sync");
 
     let anchor_height = tree.latest_height().unwrap_or(0);
-    let pir_state = rebuild_pir(&*engine, &tree, &app_state.scenario, anchor_height)?;
+    let pir_state = rebuild_pir(&*engine, &mut tree, &app_state.scenario, anchor_height)?;
     app_state.live_pir.store(Arc::new(Some(pir_state)));
     app_state.phase.store(Arc::new(ServerPhase::Serving));
     tracing::info!(anchor_height, tree_size = tree.tree_size(), "serving");
+
+    // Save snapshot again after rebuild so warm cache is persisted
+    snapshot_io::save_snapshot(&tree, &config.data_dir).await?;
+    tracing::info!("snapshot saved with warm cache");
 
     // Follow mode
     let latest_height = tree.latest_height().unwrap_or(0);
@@ -345,7 +349,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
         }
 
         let anchor_height = tree.latest_height().unwrap_or(0);
-        let pir_state = rebuild_pir(&*engine, &tree, &app_state.scenario, anchor_height)?;
+        let pir_state = rebuild_pir(&*engine, &mut tree, &app_state.scenario, anchor_height)?;
         app_state.live_pir.store(Arc::new(Some(pir_state)));
 
         if blocks_since_snapshot >= config.snapshot_interval {
@@ -409,7 +413,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
     snapshot_io::save_snapshot(&tree, &config.data_dir).await?;
 
     let anchor_height = tree.latest_height().unwrap_or(0);
-    let pir_state = rebuild_pir(&*engine, &tree, &app_state.scenario, anchor_height)?;
+    let pir_state = rebuild_pir(&*engine, &mut tree, &app_state.scenario, anchor_height)?;
     app_state.live_pir.store(Arc::new(Some(pir_state)));
     app_state.phase.store(Arc::new(ServerPhase::Serving));
 
