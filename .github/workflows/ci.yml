@@ -199,7 +199,7 @@ jobs:
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo test --workspace --all-features --release
+      - run: cargo test --workspace --all-features --release --lib
 
   notify-slack:
     name: Slack Notification
