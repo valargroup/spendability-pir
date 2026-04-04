@@ -1,9 +1,9 @@
-use crate::proto::CompactBlock;
+use chain_ingest::proto::CompactBlock;
 
 /// Extract all Orchard nullifiers from a compact block.
 ///
 /// Iterates through all transactions and collects the 32-byte nullifier from
-/// each Orchard action. Sapling nullifiers are ignored -- the PIR database
+/// each Orchard action. Sapling nullifiers are ignored — the PIR database
 /// tracks only Orchard.
 pub fn extract_nullifiers(block: &CompactBlock) -> Vec<[u8; 32]> {
     let mut nullifiers = Vec::new();
@@ -22,7 +22,7 @@ pub fn extract_nullifiers(block: &CompactBlock) -> Vec<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{CompactOrchardAction, CompactSaplingSpend, CompactTx};
+    use chain_ingest::proto::{CompactOrchardAction, CompactSaplingSpend, CompactTx};
 
     fn make_orchard_action(nf_byte: u8) -> CompactOrchardAction {
         CompactOrchardAction {
@@ -120,7 +120,7 @@ mod tests {
             height: 1,
             vtx: vec![CompactTx {
                 actions: vec![CompactOrchardAction {
-                    nullifier: vec![0xFF; 16], // too short, should be 32
+                    nullifier: vec![0xFF; 16], // too short
                     ..Default::default()
                 }],
                 ..Default::default()

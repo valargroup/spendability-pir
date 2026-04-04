@@ -1,3 +1,8 @@
+//! Lightwalletd gRPC client wrapper.
+//!
+//! Provides [`LwdClient`] for connecting to a lightwalletd instance and
+//! fetching compact blocks and chain tip information.
+
 use crate::proto::compact_tx_streamer_client::CompactTxStreamerClient;
 use crate::proto::{BlockId, BlockRange, ChainSpec, CompactBlock};
 use thiserror::Error;

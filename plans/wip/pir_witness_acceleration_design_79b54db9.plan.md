@@ -4,13 +4,13 @@ overview: Design a PIR-based system that privately serves note commitment tree w
 todos:
   - id: workspace-reorg
     content: "Restructure sync-nullifier-pir into a parent workspace with two sub-workspaces: nullifier/ (existing spend-types, hashtable-pir, nf-ingest, spend-server, spend-client) and witness/ (new crates). Shared deps (ypir, spiral-rs, proto, PirEngine) lifted to parent."
-    status: pending
+    status: done
   - id: witness-types
     content: Create witness-types crate with tree constants, PirWitness type, cap/metadata structures
-    status: pending
+    status: done
   - id: commitment-ingest
     content: "Build commitment-ingest crate: extract all note commitments from compact blocks, feed into tree builder"
-    status: pending
+    status: done
   - id: commitment-tree-db
     content: "Build commitment-tree-db crate: in-memory Merkle tree, shard/sub-shard root extraction, PIR database serialization, snapshot/restore"
     status: pending

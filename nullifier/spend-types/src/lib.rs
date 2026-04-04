@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+// Re-export shared PIR types so existing consumers (spend-server, nf-ingest)
+// continue to compile without import changes.
+pub use pir_types::{
+    PirEngine, ServerPhase, YpirScenario, CONFIRMATION_DEPTH, NU5_MAINNET_ACTIVATION,
+};
+
 pub const TARGET_SIZE: usize = 1_000_000;
-pub const CONFIRMATION_DEPTH: u64 = 10;
-pub const NU5_MAINNET_ACTIVATION: u64 = 1_687_104;
 pub const NUM_BUCKETS: usize = 16_384; // 2^14
 pub const BUCKET_CAPACITY: usize = 112;
 pub const ENTRY_BYTES: usize = 32;
@@ -53,41 +57,6 @@ pub struct SpendabilityMetadata {
     pub phase: ServerPhase,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ServerPhase {
-    Syncing {
-        current_height: u64,
-        target_height: u64,
-    },
-    Serving,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct YpirScenario {
-    pub num_items: u64,
-    pub item_size_bits: u64,
-}
-
-/// Abstraction over the PIR engine, allowing stub implementations for testing.
-pub trait PirEngine: Send + Sync {
-    type ServerState: Send + Sync;
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    /// Offline precomputation: build server state from the raw DB bytes.
-    fn setup(
-        &self,
-        db_bytes: &[u8],
-        scenario: &YpirScenario,
-    ) -> Result<Self::ServerState, Self::Error>;
-
-    /// Online computation: answer a single client query.
-    fn answer_query(
-        &self,
-        state: &Self::ServerState,
-        query_bytes: &[u8],
-    ) -> Result<Vec<u8>, Self::Error>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,8 +84,6 @@ mod tests {
             let bucket = hash_to_bucket(&nf);
             *counts.entry(bucket).or_default() += 1;
         }
-        // With 10k samples over 16,384 buckets, expect ~0.6 per bucket on average.
-        // No bucket should get a wildly disproportionate number.
         let max_count = counts.values().max().copied().unwrap_or(0);
         assert!(max_count < 10, "max bucket count {max_count} is too high");
     }
@@ -125,8 +92,6 @@ mod tests {
     fn test_hash_to_bucket_different_inputs() {
         let nf_a = [1u8; 32];
         let nf_b = [2u8; 32];
-        // Different inputs should (almost certainly) map to different buckets
-        // since the first 4 bytes differ.
         let a = hash_to_bucket(&nf_a);
         let b = hash_to_bucket(&nf_b);
         assert_ne!(a, b);

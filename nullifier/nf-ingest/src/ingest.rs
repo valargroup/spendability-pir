@@ -1,7 +1,6 @@
-use crate::chain_tracker::{ChainAction, ChainTracker};
-use crate::client::LwdClient;
 use crate::parser::extract_nullifiers;
-use spend_types::{ChainEvent, NewBlock, OrphanedBlock};
+use chain_ingest::{ChainAction, ChainTracker, LwdClient};
+use spend_types::{ChainEvent, NewBlock, OrphanedBlock, CONFIRMATION_DEPTH};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -9,7 +8,7 @@ use tokio::time::{sleep, Duration};
 #[derive(Error, Debug)]
 pub enum IngestError {
     #[error("client error: {0}")]
-    Client(#[from] crate::client::ClientError),
+    Client(#[from] chain_ingest::ClientError),
     #[error("block hash mismatch at height {height}")]
     HashMismatch { height: u64 },
 }
@@ -20,7 +19,7 @@ const SYNC_BATCH_SIZE: u64 = 10_000;
 const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Bulk-fetch blocks from `from` to `to` (inclusive) and emit ChainEvents.
-/// No reorg detection -- used during sync mode catch-up.
+/// No reorg detection — used during sync mode catch-up.
 pub async fn sync(
     client: &mut LwdClient,
     from: u64,
@@ -64,11 +63,8 @@ pub async fn follow(
     start_hash: [u8; 32],
     tx: &mpsc::Sender<ChainEvent>,
 ) -> Result<()> {
-    let mut tracker = ChainTracker::with_tip(
-        start_height,
-        start_hash,
-        spend_types::CONFIRMATION_DEPTH as usize * 2,
-    );
+    let mut tracker =
+        ChainTracker::with_tip(start_height, start_hash, CONFIRMATION_DEPTH as usize * 2);
     let mut current_height = start_height;
 
     loop {
@@ -102,12 +98,11 @@ pub async fn follow(
                     current_height = height;
                 }
                 ChainAction::Reorg { rollback_to } => {
-                    // Collect orphaned blocks from current_height down to rollback_to
                     let mut orphaned = Vec::new();
                     for h in (rollback_to + 1..=current_height).rev() {
                         orphaned.push(OrphanedBlock {
                             height: h,
-                            hash: [0u8; 32], // We don't track these hashes precisely
+                            hash: [0u8; 32],
                         });
                     }
 

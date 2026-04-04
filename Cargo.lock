@@ -232,6 +232,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chain-ingest"
+version = "0.1.0"
+dependencies = [
+ "pir-types",
+ "prost",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,6 +290,18 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "commitment-ingest"
+version = "0.1.0"
+dependencies = [
+ "chain-ingest",
+ "pir-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "witness-types",
+]
 
 [[package]]
 name = "core-foundation"
@@ -1053,15 +1079,14 @@ dependencies = [
 name = "nf-ingest"
 version = "0.1.0"
 dependencies = [
+ "chain-ingest",
  "hashtable-pir",
- "prost",
  "rand 0.8.5",
  "spend-types",
  "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-build",
  "tracing",
 ]
 
@@ -1200,6 +1225,14 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "pir-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pkg-config"
@@ -1869,6 +1902,7 @@ dependencies = [
 name = "spend-types"
 version = "0.1.0"
 dependencies = [
+ "pir-types",
  "serde",
 ]
 
@@ -2735,6 +2769,15 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "witness-types"
+version = "0.1.0"
+dependencies = [
+ "pir-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
