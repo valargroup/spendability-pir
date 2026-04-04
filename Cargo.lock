@@ -3238,6 +3238,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "witness-client"
+version = "0.1.0"
+dependencies = [
+ "incrementalmerkletree",
+ "orchard",
+ "pir-types",
+ "reqwest",
+ "serde_json",
+ "spiral-rs",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "witness-types",
+ "ypir",
+]
+
+[[package]]
 name = "witness-server"
 version = "0.1.0"
 dependencies = [

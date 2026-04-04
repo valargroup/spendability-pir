@@ -68,9 +68,7 @@ mod tests {
 
         let mut db = vec![0u8; L0_DB_BYTES];
         // Write a known pattern into row 0
-        for byte in db.iter_mut().take(32) {
-            *byte = 0xAB;
-        }
+        db[..32].fill(0xAB);
 
         let state = engine.setup(&db, &scenario).unwrap();
 
