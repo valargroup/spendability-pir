@@ -1,0 +1,666 @@
+//! In-memory Orchard note commitment tree with shard/sub-shard decomposition.
+//!
+//! Maintains an append-only leaf store with per-block rollback support.
+//! Computes shard roots, sub-shard roots, and serializes PIR database rows
+//! using protocol-correct Sinsemilla hashing via [`MerkleHashOrchard`].
+//!
+//! # Operations
+//!
+//! - [`CommitmentTreeDb::append_commitments`] — extend the tree with a block's commitments
+//! - [`CommitmentTreeDb::rollback_to`] — handle chain reorgs
+//! - [`CommitmentTreeDb::shard_roots`] — all populated shard roots for cap construction
+//! - [`CommitmentTreeDb::subshard_roots`] — 256 sub-shard roots for a given shard
+//! - [`CommitmentTreeDb::subshard_leaves`] — 256 leaf commitments for a given sub-shard
+//! - [`CommitmentTreeDb::build_pir_db`] — row-major bytes for YPIR setup
+//! - [`CommitmentTreeDb::broadcast_data`] — full broadcast payload
+//! - Snapshot/restore via [`CommitmentTreeDb::to_snapshot`] / [`from_snapshot`]
+
+pub mod snapshot;
+
+use incrementalmerkletree::{Hashable, Level};
+use orchard::tree::MerkleHashOrchard;
+use witness_types::*;
+
+/// Per-block record tracking how many commitments each block contributed.
+/// Used for rollback support: removing a block removes its leaves from the end.
+#[derive(Debug, Clone)]
+pub struct BlockRecord {
+    pub height: u64,
+    pub hash: [u8; 32],
+    pub num_commitments: u32,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TreeError {
+    #[error("shard index {shard_idx} out of range (populated: {populated})")]
+    ShardOutOfRange { shard_idx: u32, populated: u32 },
+
+    #[error("snapshot corrupted: {reason}")]
+    SnapshotCorrupted { reason: String },
+}
+
+/// In-memory Orchard note commitment tree.
+///
+/// Stores all leaf commitments within the PIR window and per-block metadata for
+/// rollback. Hash computations use [`MerkleHashOrchard`] (Sinsemilla) with
+/// level-dependent empty-subtree sentinels from the Orchard protocol.
+pub struct CommitmentTreeDb {
+    /// Leaf commitments in append order. `leaves[i]` = commitment at position `i`.
+    leaves: Vec<Hash>,
+    /// Per-block records ordered by height, for rollback support.
+    blocks: Vec<BlockRecord>,
+    /// Precomputed empty subtree roots for levels `0..=TREE_DEPTH`.
+    /// `empty_roots[k]` is the root of an all-empty subtree whose leaves sit at
+    /// level `k` (equivalently, `MerkleHashOrchard::empty_root(Level::from(k))`).
+    empty_roots: Vec<Hash>,
+}
+
+impl CommitmentTreeDb {
+    pub fn new() -> Self {
+        Self {
+            leaves: Vec::new(),
+            blocks: Vec::new(),
+            empty_roots: precompute_empty_roots(),
+        }
+    }
+
+    /// Total number of leaves appended to the tree.
+    pub fn tree_size(&self) -> u64 {
+        self.leaves.len() as u64
+    }
+
+    /// Height of the most recently ingested block, if any.
+    pub fn latest_height(&self) -> Option<u64> {
+        self.blocks.last().map(|b| b.height)
+    }
+
+    /// Hash of the most recently ingested block, if any.
+    pub fn latest_block_hash(&self) -> Option<[u8; 32]> {
+        self.blocks.last().map(|b| b.hash)
+    }
+
+    /// Number of populated shards (completed + frontier).
+    pub fn populated_shards(&self) -> u32 {
+        if self.leaves.is_empty() {
+            0
+        } else {
+            ((self.leaves.len() - 1) / SHARD_LEAVES + 1) as u32
+        }
+    }
+
+    /// First shard index in the PIR window (always 0 in v1).
+    pub fn window_start_shard(&self) -> u32 {
+        0
+    }
+
+    /// Number of shards in the PIR window (capped at [`L0_MAX_SHARDS`]).
+    pub fn window_shard_count(&self) -> u32 {
+        self.populated_shards().min(L0_MAX_SHARDS as u32)
+    }
+
+    /// Block records (for snapshot serialization).
+    pub fn blocks(&self) -> &[BlockRecord] {
+        &self.blocks
+    }
+
+    /// Raw leaf data (for snapshot serialization).
+    pub fn leaves(&self) -> &[Hash] {
+        &self.leaves
+    }
+
+    /// Reference to precomputed empty roots.
+    pub fn empty_roots(&self) -> &[Hash] {
+        &self.empty_roots
+    }
+
+    // ── Mutation ──────────────────────────────────────────────────────
+
+    /// Append note commitments from a newly ingested block.
+    pub fn append_commitments(&mut self, height: u64, hash: [u8; 32], commitments: &[Hash]) {
+        self.blocks.push(BlockRecord {
+            height,
+            hash,
+            num_commitments: commitments.len() as u32,
+        });
+        self.leaves.extend_from_slice(commitments);
+    }
+
+    /// Roll back all blocks with height strictly greater than `target_height`.
+    pub fn rollback_to(&mut self, target_height: u64) {
+        let mut to_remove: usize = 0;
+        while let Some(last) = self.blocks.last() {
+            if last.height > target_height {
+                to_remove += last.num_commitments as usize;
+                self.blocks.pop();
+            } else {
+                break;
+            }
+        }
+        let new_len = self.leaves.len().saturating_sub(to_remove);
+        self.leaves.truncate(new_len);
+    }
+
+    // ── Leaf / root queries ──────────────────────────────────────────
+
+    /// Retrieve the 256 leaf commitments for a sub-shard.
+    ///
+    /// Positions beyond the tree's current frontier are filled with
+    /// `MerkleHashOrchard::empty_root(Level::from(0))` (the empty leaf
+    /// sentinel), **not** zero bytes.
+    pub fn subshard_leaves(&self, shard_idx: u32, subshard_idx: u8) -> Vec<Hash> {
+        let start = (shard_idx as usize) * SHARD_LEAVES + (subshard_idx as usize) * SUBSHARD_LEAVES;
+        let empty_leaf = self.empty_roots[0];
+        (0..SUBSHARD_LEAVES)
+            .map(|i| {
+                let pos = start + i;
+                if pos < self.leaves.len() {
+                    self.leaves[pos]
+                } else {
+                    empty_leaf
+                }
+            })
+            .collect()
+    }
+
+    /// Compute the 256 sub-shard roots for a given shard.
+    ///
+    /// Sub-shards entirely beyond the tree frontier use the precomputed
+    /// `empty_root(SUBSHARD_HEIGHT)` without recomputing Sinsemilla hashes.
+    pub fn subshard_roots(&self, shard_idx: u32) -> Vec<Hash> {
+        let shard_start = (shard_idx as usize) * SHARD_LEAVES;
+        let empty_ss_root = self.empty_roots[SUBSHARD_HEIGHT];
+
+        (0..SUBSHARDS_PER_SHARD)
+            .map(|ss| {
+                let ss_start = shard_start + ss * SUBSHARD_LEAVES;
+                if ss_start >= self.leaves.len() {
+                    return empty_ss_root;
+                }
+                let leaves = self.subshard_leaves(shard_idx, ss as u8);
+                self.complete_subtree_root(&leaves, 0)
+            })
+            .collect()
+    }
+
+    /// Compute shard roots for all populated shards.
+    ///
+    /// Returns `(shard_index, root_hash)` pairs.
+    pub fn shard_roots(&self) -> Vec<(u32, Hash)> {
+        let n = self.populated_shards();
+        (0..n)
+            .map(|i| {
+                let ss_roots = self.subshard_roots(i);
+                let root = self.complete_subtree_root(&ss_roots, SUBSHARD_HEIGHT as u8);
+                (i, root)
+            })
+            .collect()
+    }
+
+    /// Compute the full depth-32 tree root at the current state.
+    ///
+    /// For an empty tree, returns `empty_root(TREE_DEPTH)`.
+    pub fn tree_root(&self) -> Hash {
+        if self.leaves.is_empty() {
+            return self.empty_roots[TREE_DEPTH];
+        }
+        let shard_roots: Vec<Hash> = self.shard_roots().into_iter().map(|(_, h)| h).collect();
+        self.sparse_subtree_root(&shard_roots, 1 << SHARD_HEIGHT, SHARD_HEIGHT as u8)
+    }
+
+    // ── Broadcast / PIR database ─────────────────────────────────────
+
+    /// Build the full broadcast payload at the given anchor height.
+    ///
+    /// Computes sub-shard roots once and derives shard roots from them,
+    /// avoiding redundant Sinsemilla hash work.
+    pub fn broadcast_data(&self, anchor_height: u64) -> BroadcastData {
+        let window_start = self.window_start_shard();
+        let window_count = self.window_shard_count();
+        let n_shards = self.populated_shards();
+
+        let mut cap_roots = Vec::with_capacity(n_shards as usize);
+        let mut broadcast_ss = Vec::with_capacity(window_count as usize);
+
+        for i in 0..n_shards {
+            let ss = self.subshard_roots(i);
+            let shard_root = self.complete_subtree_root(&ss, SUBSHARD_HEIGHT as u8);
+            cap_roots.push(shard_root);
+            if i >= window_start && i < window_start + window_count {
+                broadcast_ss.push(ShardSubRoots { roots: ss });
+            }
+        }
+
+        BroadcastData {
+            cap: CapData {
+                shard_roots: cap_roots,
+            },
+            subshard_roots: broadcast_ss,
+            window_start_shard: window_start,
+            window_shard_count: window_count,
+            anchor_height,
+        }
+    }
+
+    /// Build the PIR database as row-major bytes.
+    ///
+    /// Each row is one sub-shard: 256 leaves × 32 bytes = 8,192 bytes.
+    /// Rows within the populated window contain leaf data (with empty-leaf
+    /// sentinels for positions beyond the frontier). Padding rows beyond the
+    /// window are zero-filled.
+    pub fn build_pir_db(&self) -> Vec<u8> {
+        let window_start = self.window_start_shard();
+        let window_count = self.window_shard_count();
+
+        let mut db = Vec::with_capacity(L0_DB_BYTES);
+
+        for i in 0..window_count {
+            let shard_idx = window_start + i;
+            for ss in 0..SUBSHARDS_PER_SHARD {
+                let leaves = self.subshard_leaves(shard_idx, ss as u8);
+                for leaf in &leaves {
+                    db.extend_from_slice(leaf);
+                }
+            }
+        }
+
+        db.resize(L0_DB_BYTES, 0u8);
+        db
+    }
+
+    // ── Internal hashing ─────────────────────────────────────────────
+
+    /// Root of a complete binary subtree from exactly `2^k` leaves.
+    ///
+    /// `base_level` is the Merkle combine level of the leaf nodes: leaves are
+    /// at level `base_level`, and `combine(base_level, left, right)` produces
+    /// a node at level `base_level + 1`.
+    fn complete_subtree_root(&self, leaves: &[Hash], base_level: u8) -> Hash {
+        debug_assert!(leaves.len().is_power_of_two());
+        if leaves.len() == 1 {
+            return leaves[0];
+        }
+        let mut current: Vec<Hash> = leaves.to_vec();
+        let mut level = base_level;
+        while current.len() > 1 {
+            let mut next = Vec::with_capacity(current.len() / 2);
+            for pair in current.chunks_exact(2) {
+                next.push(hash_combine(level, &pair[0], &pair[1]));
+            }
+            current = next;
+            level += 1;
+        }
+        current[0]
+    }
+
+    /// Root of a sparse subtree where `populated` leaves are left-packed and
+    /// positions beyond `populated.len()` are empty.
+    ///
+    /// `capacity` must be a power of two (total leaf slots in the subtree).
+    /// `base_level` is the combine level of the leaves.
+    fn sparse_subtree_root(&self, populated: &[Hash], capacity: usize, base_level: u8) -> Hash {
+        debug_assert!(capacity.is_power_of_two());
+        self.sparse_root_rec(populated, 0, capacity, base_level)
+    }
+
+    fn sparse_root_rec(&self, leaves: &[Hash], offset: usize, size: usize, base_level: u8) -> Hash {
+        if size == 1 {
+            return if offset < leaves.len() {
+                leaves[offset]
+            } else {
+                self.empty_roots[base_level as usize]
+            };
+        }
+
+        let half = size / 2;
+        let child_height = half.trailing_zeros() as u8;
+        let combine_level = base_level + child_height;
+
+        let left = self.sparse_root_rec(leaves, offset, half, base_level);
+        let right = if offset + half >= leaves.len() {
+            self.empty_roots[combine_level as usize]
+        } else {
+            self.sparse_root_rec(leaves, offset + half, half, base_level)
+        };
+
+        hash_combine(combine_level, &left, &right)
+    }
+}
+
+impl Default for CommitmentTreeDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Free functions ───────────────────────────────────────────────────
+
+/// Precompute empty subtree roots for levels `0..=TREE_DEPTH`.
+///
+/// `empty_roots[0]` = `MerkleHashOrchard::empty_leaf()` (the empty leaf sentinel).
+/// `empty_roots[k]` = `combine(k-1, empty_roots[k-1], empty_roots[k-1])`.
+fn precompute_empty_roots() -> Vec<Hash> {
+    let mut roots = Vec::with_capacity(TREE_DEPTH + 1);
+    let empty_leaf = MerkleHashOrchard::empty_leaf();
+    roots.push(empty_leaf.to_bytes());
+
+    let mut current = empty_leaf;
+    for level in 0..TREE_DEPTH {
+        current =
+            <MerkleHashOrchard as Hashable>::combine(Level::from(level as u8), &current, &current);
+        roots.push(current.to_bytes());
+    }
+    roots
+}
+
+/// Combine two hashes at a given level using Sinsemilla (MerkleHashOrchard).
+fn hash_combine(level: u8, left: &Hash, right: &Hash) -> Hash {
+    let l = bytes_to_mho(left);
+    let r = bytes_to_mho(right);
+    <MerkleHashOrchard as Hashable>::combine(Level::from(level), &l, &r).to_bytes()
+}
+
+fn bytes_to_mho(hash: &Hash) -> MerkleHashOrchard {
+    Option::from(MerkleHashOrchard::from_bytes(hash)).expect("invalid MerkleHashOrchard bytes")
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_leaf(byte: u8) -> Hash {
+        // Use the empty_leaf serialized form as a base, but for distinct test
+        // leaves we just need valid field elements. The simplest valid field
+        // element is a small integer encoded in LE.
+        let mut h = [0u8; 32];
+        h[0] = byte;
+        h
+    }
+
+    #[test]
+    fn empty_tree_root_matches_protocol() {
+        let tree = CommitmentTreeDb::new();
+        let root = tree.tree_root();
+        assert_eq!(root, tree.empty_roots[TREE_DEPTH]);
+
+        // Verify it matches MerkleHashOrchard::empty_root(32)
+        let expected = <MerkleHashOrchard as Hashable>::empty_root(Level::from(TREE_DEPTH as u8));
+        assert_eq!(root, expected.to_bytes());
+    }
+
+    #[test]
+    fn tree_size_tracking() {
+        let mut tree = CommitmentTreeDb::new();
+        assert_eq!(tree.tree_size(), 0);
+        assert_eq!(tree.populated_shards(), 0);
+
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        assert_eq!(tree.tree_size(), 2);
+        assert_eq!(tree.populated_shards(), 1);
+        assert_eq!(tree.latest_height(), Some(100));
+
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        assert_eq!(tree.tree_size(), 3);
+        assert_eq!(tree.latest_height(), Some(101));
+    }
+
+    #[test]
+    fn rollback_removes_blocks_and_leaves() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        tree.append_commitments(102, [3u8; 32], &[make_leaf(4), make_leaf(5)]);
+
+        assert_eq!(tree.tree_size(), 5);
+
+        tree.rollback_to(100);
+        assert_eq!(tree.tree_size(), 2);
+        assert_eq!(tree.latest_height(), Some(100));
+        assert_eq!(tree.blocks.len(), 1);
+    }
+
+    #[test]
+    fn rollback_all() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(2)]);
+
+        tree.rollback_to(0);
+        assert_eq!(tree.tree_size(), 0);
+        assert!(tree.blocks.is_empty());
+    }
+
+    #[test]
+    fn subshard_leaves_padding() {
+        let mut tree = CommitmentTreeDb::new();
+        // Append 3 leaves — sub-shard 0 of shard 0 should have 3 real + 253 empty
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2), make_leaf(3)]);
+
+        let leaves = tree.subshard_leaves(0, 0);
+        assert_eq!(leaves.len(), SUBSHARD_LEAVES);
+        assert_eq!(leaves[0], make_leaf(1));
+        assert_eq!(leaves[1], make_leaf(2));
+        assert_eq!(leaves[2], make_leaf(3));
+
+        let empty_leaf = tree.empty_roots[0];
+        for leaf in &leaves[3..] {
+            assert_eq!(
+                *leaf, empty_leaf,
+                "positions beyond frontier must be empty_leaf sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn subshard_leaves_entirely_empty() {
+        let tree = CommitmentTreeDb::new();
+        let leaves = tree.subshard_leaves(0, 0);
+        assert_eq!(leaves.len(), SUBSHARD_LEAVES);
+        let empty_leaf = tree.empty_roots[0];
+        for leaf in &leaves {
+            assert_eq!(*leaf, empty_leaf);
+        }
+    }
+
+    #[test]
+    fn subshard_root_of_empty_subshard() {
+        let tree = CommitmentTreeDb::new();
+        let leaves = tree.subshard_leaves(0, 0);
+        let root = tree.complete_subtree_root(&leaves, 0);
+        assert_eq!(
+            root, tree.empty_roots[SUBSHARD_HEIGHT],
+            "root of 256 empty leaves at level 0 should equal empty_root(8)"
+        );
+    }
+
+    #[test]
+    fn shard_root_of_empty_shard() {
+        let tree = CommitmentTreeDb::new();
+        // 256 empty sub-shard roots → shard root
+        let ss_roots: Vec<Hash> = (0..SUBSHARDS_PER_SHARD)
+            .map(|_| tree.empty_roots[SUBSHARD_HEIGHT])
+            .collect();
+        let root = tree.complete_subtree_root(&ss_roots, SUBSHARD_HEIGHT as u8);
+        assert_eq!(
+            root, tree.empty_roots[SHARD_HEIGHT],
+            "root of 256 empty sub-shard roots should equal empty_root(16)"
+        );
+    }
+
+    #[test]
+    fn single_leaf_tree_root_is_deterministic() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(42)]);
+        let root1 = tree.tree_root();
+
+        let mut tree2 = CommitmentTreeDb::new();
+        tree2.append_commitments(100, [1u8; 32], &[make_leaf(42)]);
+        let root2 = tree2.tree_root();
+
+        assert_eq!(root1, root2, "same input must produce same root");
+    }
+
+    #[test]
+    fn single_leaf_tree_root_differs_from_empty() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+        let root = tree.tree_root();
+        let empty = CommitmentTreeDb::new().tree_root();
+        assert_ne!(
+            root, empty,
+            "non-empty tree root must differ from empty tree root"
+        );
+    }
+
+    #[test]
+    fn two_leaves_root_manual_verification() {
+        let mut tree = CommitmentTreeDb::new();
+        let leaf_a = make_leaf(10);
+        let leaf_b = make_leaf(20);
+        tree.append_commitments(100, [1u8; 32], &[leaf_a, leaf_b]);
+
+        // Manually compute: hash(level=0, a, b) gives the sub-sub-pair,
+        // then padding with empty roots up to level 32
+        let pair_hash = hash_combine(0, &leaf_a, &leaf_b);
+        let empty_leaf = tree.empty_roots[0];
+        let empty_pair = hash_combine(0, &empty_leaf, &empty_leaf);
+        assert_eq!(empty_pair, tree.empty_roots[1]);
+
+        // At level 1: combine(pair_hash, empty_root(1))
+        let level1 = hash_combine(1, &pair_hash, &tree.empty_roots[1]);
+
+        // At level 2..7: combine with empty_root(k) at each level
+        let mut current = level1;
+        for k in 2..SUBSHARD_HEIGHT {
+            current = hash_combine(k as u8, &current, &tree.empty_roots[k]);
+        }
+        // current is now the sub-shard root (level 8)
+
+        // Verify sub-shard root
+        let ss_roots = tree.subshard_roots(0);
+        assert_eq!(
+            ss_roots[0], current,
+            "sub-shard 0 root must match manual computation"
+        );
+
+        // All other sub-shard roots should be empty_root(8)
+        for ss in &ss_roots[1..] {
+            assert_eq!(*ss, tree.empty_roots[SUBSHARD_HEIGHT]);
+        }
+    }
+
+    #[test]
+    fn window_counts() {
+        let mut tree = CommitmentTreeDb::new();
+        assert_eq!(tree.window_start_shard(), 0);
+        assert_eq!(tree.window_shard_count(), 0);
+
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+        assert_eq!(tree.window_shard_count(), 1);
+    }
+
+    #[test]
+    fn pir_db_size_is_correct() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+        let db = tree.build_pir_db();
+        assert_eq!(db.len(), L0_DB_BYTES, "PIR db must be exactly L0_DB_BYTES");
+    }
+
+    #[test]
+    fn pir_db_contains_leaf_data() {
+        let mut tree = CommitmentTreeDb::new();
+        let leaf = make_leaf(0xAB);
+        tree.append_commitments(100, [1u8; 32], &[leaf]);
+        let db = tree.build_pir_db();
+
+        // First 32 bytes should be the leaf
+        assert_eq!(&db[..32], &leaf[..]);
+    }
+
+    #[test]
+    fn pir_db_padding_is_zero() {
+        let tree = CommitmentTreeDb::new();
+        let db = tree.build_pir_db();
+        assert_eq!(db.len(), L0_DB_BYTES);
+        assert!(
+            db.iter().all(|&b| b == 0),
+            "empty tree PIR db must be all zeros"
+        );
+    }
+
+    #[test]
+    fn broadcast_data_structure() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+
+        let bd = tree.broadcast_data(100);
+        assert_eq!(bd.anchor_height, 100);
+        assert_eq!(bd.window_start_shard, 0);
+        assert_eq!(bd.window_shard_count, 1);
+        assert_eq!(bd.cap.shard_roots.len(), 1);
+        assert_eq!(bd.subshard_roots.len(), 1);
+        assert_eq!(bd.subshard_roots[0].roots.len(), SUBSHARDS_PER_SHARD);
+    }
+
+    #[test]
+    fn shard_root_matches_cap() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+
+        let shard_roots = tree.shard_roots();
+        let bd = tree.broadcast_data(100);
+
+        assert_eq!(shard_roots.len(), bd.cap.shard_roots.len());
+        for (i, (idx, root)) in shard_roots.iter().enumerate() {
+            assert_eq!(*idx, i as u32);
+            assert_eq!(*root, bd.cap.shard_roots[i]);
+        }
+    }
+
+    #[test]
+    fn rollback_then_reappend_produces_same_state() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        let root_after_100 = tree.tree_root();
+
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        tree.rollback_to(100);
+        assert_eq!(tree.tree_root(), root_after_100);
+
+        tree.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        let root_after_101 = tree.tree_root();
+
+        let mut tree2 = CommitmentTreeDb::new();
+        tree2.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+        tree2.append_commitments(101, [2u8; 32], &[make_leaf(3)]);
+        assert_eq!(tree2.tree_root(), root_after_101);
+    }
+
+    #[test]
+    fn empty_roots_are_consistent() {
+        let tree = CommitmentTreeDb::new();
+        for level in 0..=TREE_DEPTH {
+            let expected =
+                <MerkleHashOrchard as Hashable>::empty_root(Level::from(level as u8)).to_bytes();
+            assert_eq!(
+                tree.empty_roots[level], expected,
+                "empty_roots[{level}] mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn append_empty_block_preserves_state() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1)]);
+        let root_before = tree.tree_root();
+        let size_before = tree.tree_size();
+
+        tree.append_commitments(101, [2u8; 32], &[]);
+        assert_eq!(tree.tree_size(), size_before);
+        assert_eq!(tree.tree_root(), root_before);
+        assert_eq!(tree.latest_height(), Some(101));
+    }
+}

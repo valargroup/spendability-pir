@@ -112,6 +112,33 @@ jobs:
           -p chain-ingest
           -p witness-types
           -p commitment-ingest
+          -p commitment-tree-db
+
+  test-tree-correctness:
+    name: Test (tree correctness)
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-03-15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tree-correctness
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify shard root against mainnet
+        run: >-
+          cargo test
+          -p commitment-tree-db
+          --test tree_correctness
+          --release
+          -- --nocapture
 
   test-ypir:
     name: Test (YPIR)
@@ -131,3 +158,38 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: cargo test --workspace --all-features --release
+
+  notify-slack:
+    name: Slack Notification
+    if: ${{ always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && contains(join(needs.*.result, ','), 'failure') }}
+    needs: [fmt, clippy, test-nullifier, test-witness, test-tree-correctness, test-ypir]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack on failure
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "CI failed on main",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "CI Failed on main", "emoji": true }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Repo:*\n<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>" },
+                    { "type": "mrkdwn", "text": "*Workflow:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|CI>" },
+                    { "type": "mrkdwn", "text": "*Commit:*\n<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|`${{ github.sha }}`>" },
+                    { "type": "mrkdwn", "text": "*Author:*\n${{ github.actor }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nFormat: `${{ needs.fmt.result }}` | Clippy: `${{ needs.clippy.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
+                }
+              ]
+            }

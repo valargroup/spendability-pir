@@ -4,7 +4,9 @@
 //! fetching compact blocks and chain tip information.
 
 use crate::proto::compact_tx_streamer_client::CompactTxStreamerClient;
-use crate::proto::{BlockId, BlockRange, ChainSpec, CompactBlock};
+use crate::proto::{
+    BlockId, BlockRange, ChainSpec, CompactBlock, Empty, GetSubtreeRootsArg, SubtreeRoot, TreeState,
+};
 use thiserror::Error;
 use tokio_stream::StreamExt;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -89,5 +91,49 @@ impl LwdClient {
         }
 
         Ok(blocks)
+    }
+
+    /// Get the tree state (frontier) at a specific block height.
+    pub async fn get_tree_state(&mut self, height: u64) -> Result<TreeState> {
+        let response = self
+            .inner
+            .get_tree_state(BlockId {
+                height,
+                hash: vec![],
+            })
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// Get the latest tree state (at the chain tip).
+    pub async fn get_latest_tree_state(&mut self) -> Result<TreeState> {
+        let response = self.inner.get_latest_tree_state(Empty {}).await?;
+        Ok(response.into_inner())
+    }
+
+    /// Get completed subtree (shard) roots for a shielded protocol.
+    ///
+    /// `protocol`: 0 = Sapling, 1 = Orchard.
+    /// Returns roots starting from `start_index`, up to `max_entries`.
+    pub async fn get_subtree_roots(
+        &mut self,
+        protocol: i32,
+        start_index: u32,
+        max_entries: u32,
+    ) -> Result<Vec<SubtreeRoot>> {
+        let response = self
+            .inner
+            .get_subtree_roots(GetSubtreeRootsArg {
+                start_index,
+                shielded_protocol: protocol,
+                max_entries,
+            })
+            .await?;
+        let mut stream = response.into_inner();
+        let mut roots = Vec::new();
+        while let Some(root) = stream.next().await {
+            roots.push(root?);
+        }
+        Ok(roots)
     }
 }

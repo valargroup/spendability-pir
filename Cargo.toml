@@ -10,6 +10,7 @@ members = [
     "nullifier/spend-client",
     "witness/witness-types",
     "witness/commitment-ingest",
+    "witness/commitment-tree-db",
 ]
 
 [profile.release]
