@@ -33,14 +33,24 @@ pub(crate) fn reconstruct_witness(
 
     let shard_offset = (shard_idx - broadcast.window_start_shard) as usize;
     let ss_roots = &broadcast.subshard_roots[shard_offset].roots;
-    extract_siblings(ss_roots, subshard_idx as usize, SUBSHARD_HEIGHT as u8, &mut siblings);
+    extract_siblings(
+        ss_roots,
+        subshard_idx as usize,
+        SUBSHARD_HEIGHT as u8,
+        &mut siblings,
+    );
 
     let total_cap_slots = 1usize << SHARD_HEIGHT;
     let mut padded_cap = Vec::with_capacity(total_cap_slots);
     padded_cap.extend_from_slice(&broadcast.cap.shard_roots);
     let empty_shard_root = empty_root(SHARD_HEIGHT as u8);
     padded_cap.resize(total_cap_slots, empty_shard_root);
-    extract_siblings(&padded_cap, shard_idx as usize, SHARD_HEIGHT as u8, &mut siblings);
+    extract_siblings(
+        &padded_cap,
+        shard_idx as usize,
+        SHARD_HEIGHT as u8,
+        &mut siblings,
+    );
 
     let anchor_root = compute_root_from_path(position, &leaves[leaf_idx as usize], &siblings);
 
@@ -55,7 +65,12 @@ pub(crate) fn reconstruct_witness(
 /// Given a complete array of 2^k nodes at a given base_level, extract the
 /// sibling subtree roots along the path to `index` and place them into
 /// `siblings[base_level..base_level + k]`.
-fn extract_siblings(nodes: &[Hash], index: usize, base_level: u8, siblings: &mut [Hash; TREE_DEPTH]) {
+fn extract_siblings(
+    nodes: &[Hash],
+    index: usize,
+    base_level: u8,
+    siblings: &mut [Hash; TREE_DEPTH],
+) {
     let num_levels = nodes.len().trailing_zeros() as usize;
     let mut current_nodes = nodes.to_vec();
     let mut idx = index;
@@ -89,11 +104,11 @@ fn compute_root_from_path(position: u64, leaf: &Hash, siblings: &[Hash; TREE_DEP
     let mut current = *leaf;
     let mut pos = position;
 
-    for level in 0..TREE_DEPTH {
+    for (level, sibling) in siblings.iter().enumerate() {
         let (left, right) = if pos & 1 == 0 {
-            (&current, &siblings[level])
+            (&current, sibling)
         } else {
-            (&siblings[level], &current)
+            (sibling, &current)
         };
         current = hash_combine(level as u8, left, right);
         pos >>= 1;
@@ -165,7 +180,10 @@ mod tests {
         let b = MerkleHashOrchard::empty_leaf().to_bytes();
         let combined = hash_combine(0, &a, &b);
         let expected = empty_root(1);
-        assert_eq!(combined, expected, "H(0, empty, empty) should equal empty_root(1)");
+        assert_eq!(
+            combined, expected,
+            "H(0, empty, empty) should equal empty_root(1)"
+        );
     }
 
     #[test]
@@ -174,7 +192,14 @@ mod tests {
         let leaves = vec![empty_leaf; 4];
         let mut siblings = [[0u8; 32]; TREE_DEPTH];
         extract_siblings(&leaves, 0, 0, &mut siblings);
-        assert_eq!(siblings[0], empty_leaf, "level 0 sibling of leaf 0 is leaf 1");
-        assert_eq!(siblings[1], empty_root(1), "level 1 sibling is root of pair (2,3)");
+        assert_eq!(
+            siblings[0], empty_leaf,
+            "level 0 sibling of leaf 0 is leaf 1"
+        );
+        assert_eq!(
+            siblings[1],
+            empty_root(1),
+            "level 1 sibling is root of pair (2,3)"
+        );
     }
 }

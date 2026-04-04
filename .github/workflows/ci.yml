@@ -114,6 +114,7 @@ jobs:
           -p commitment-ingest
           -p commitment-tree-db
           -p witness-server
+          -p witness-client
 
   test-tree-correctness:
     name: Test (tree correctness)
