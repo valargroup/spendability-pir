@@ -13,7 +13,7 @@ todos:
     status: done
   - id: commitment-tree-db
     content: "Build commitment-tree-db crate: in-memory Merkle tree, shard/sub-shard root extraction, PIR database serialization, snapshot/restore"
-    status: pending
+    status: done
   - id: witness-server
     content: "Build witness-server: Axum HTTP, single YPIR engine, broadcast endpoints for cap + sub-shard roots, sync/follow modes"
     status: pending

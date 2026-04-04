@@ -1,0 +1,12 @@
+[package]
+name = "commitment-tree-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+witness-types = { path = "../witness-types" }
+orchard = { version = "0.12", default-features = false }
+incrementalmerkletree = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+thiserror = "2"
+tracing = "0.1"
