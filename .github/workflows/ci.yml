@@ -150,7 +150,7 @@ jobs:
   test-pir-round-trip:
     name: Test (PIR round-trip)
     needs: changes
-    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true'
+    if: github.event_name == 'push' && (needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
