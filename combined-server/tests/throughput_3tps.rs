@@ -447,10 +447,10 @@ fn sustained_5tps_15s_blocks() {
 /// zero-filled byte vectors at each target size. YPIR cost depends on
 /// database geometry (rows × row_bytes), not content.
 ///
-/// 3 TPS × 2 actions/tx × 75 s blocks = 450 actions/block = 518,400/day.
+/// 3 TPS × 2 actions/tx × 25 s blocks = 150 actions/block = 518,400/day.
 #[test]
 fn bench_scaling_ceiling() {
-    const BLOCK_INTERVAL: f64 = 75.0;
+    const BLOCK_INTERVAL: f64 = 25.0;
     const MAX_DB_BYTES: usize = 2 * 1024 * 1024 * 1024; // 2 GB cap per subsystem
 
     struct Scenario {
@@ -459,6 +459,9 @@ fn bench_scaling_ceiling() {
         wit_subshards: u64,
     }
 
+    // 3 TPS × 2 actions/tx × 25 s blocks = 150 actions/block = 518,400/day
+    // (daily throughput unchanged; only block interval & actions-per-block change)
+    //
     // NF bucket count: next_pow2(actions_in_period / BUCKET_CAPACITY)
     // WIT subshards:   ceil(actions_in_period / SHARD_LEAVES) * SUBSHARDS_PER_SHARD
     //                  = ceil(actions / 65536) * 256
@@ -495,7 +498,7 @@ fn bench_scaling_ceiling() {
         },
     ];
 
-    println!("\n=== PIR Scaling Benchmark (3 TPS / 75 s blocks) ===");
+    println!("\n=== PIR Scaling Benchmark (3 TPS / 25 s blocks) ===");
     println!(
         "  Row sizes: NF = {} B, WIT = {} B",
         BUCKET_BYTES, SUBSHARD_ROW_BYTES
