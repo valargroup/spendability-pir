@@ -62,16 +62,26 @@ pub async fn query<P: PirEngine + 'static>(
     State(state): State<Arc<AppState<P>>>,
     body: Bytes,
 ) -> Response {
+    let t0 = std::time::Instant::now();
     let pir = state.live_pir.load();
     let pir_state = match pir.as_ref() {
         Some(s) => s,
         None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
 
+    let query_bytes = body.len();
     match state.engine.answer_query(&pir_state.engine_state, &body) {
-        Ok(response_bytes) => response_bytes.into_response(),
+        Ok(response_bytes) => {
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis(),
+                query_bytes,
+                response_bytes = response_bytes.len(),
+                "witness query answered",
+            );
+            response_bytes.into_response()
+        }
         Err(e) => {
-            tracing::error!(error = %e, "PIR query failed");
+            tracing::error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "PIR query failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

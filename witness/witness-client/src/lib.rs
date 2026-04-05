@@ -39,6 +39,7 @@ impl WitnessClient {
     /// the YPIR client. The broadcast download is ~104 KB and cached for the
     /// lifetime of this client.
     pub async fn connect(url: &str) -> Result<Self> {
+        let t0 = std::time::Instant::now();
         let base_url = url.trim_end_matches('/').to_string();
         let http = reqwest::Client::new();
 
@@ -49,18 +50,33 @@ impl WitnessClient {
             .error_for_status()?
             .json()
             .await?;
+        tracing::info!(elapsed_ms = t0.elapsed().as_millis(), "fetched /params");
 
+        let t1 = std::time::Instant::now();
         let broadcast_resp = http.get(format!("{base_url}/broadcast")).send().await?;
         if broadcast_resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             return Err(WitnessClientError::ServerUnavailable);
         }
         let broadcast: BroadcastData = broadcast_resp.error_for_status()?.json().await?;
+        tracing::info!(
+            elapsed_ms = t1.elapsed().as_millis(),
+            broadcast_bytes = serde_json::to_vec(&broadcast).map(|v| v.len()).unwrap_or(0),
+            "fetched /broadcast",
+        );
 
+        let t2 = std::time::Instant::now();
         let params = params_for_scenario_simplepir(scenario.num_items, scenario.item_size_bits);
         let ypir_client = YPIRClient::new(&params);
+        tracing::info!(
+            elapsed_ms = t2.elapsed().as_millis(),
+            num_items = scenario.num_items,
+            item_size_bits = scenario.item_size_bits,
+            "YPIRClient initialized",
+        );
 
         tracing::info!(
             base_url,
+            total_connect_ms = t0.elapsed().as_millis(),
             anchor_height = broadcast.anchor_height,
             window_start = broadcast.window_start_shard,
             window_count = broadcast.window_shard_count,
@@ -84,6 +100,7 @@ impl WitnessClient {
     /// the cached broadcast data to reconstruct the full 32-level authentication
     /// path. Self-verifies the witness before returning.
     pub async fn get_witness(&self, position: u64) -> Result<PirWitness> {
+        let t0 = std::time::Instant::now();
         let (shard_idx, subshard_idx, leaf_idx) = decompose_position(position);
         let window_end = self.broadcast.window_start_shard + self.broadcast.window_shard_count;
 
@@ -98,9 +115,18 @@ impl WitnessClient {
         let row_idx =
             physical_row_index(shard_idx, subshard_idx, self.broadcast.window_start_shard);
 
+        let t1 = std::time::Instant::now();
         let (query, seed) = self.ypir_client.generate_query_simplepir(row_idx);
         let query_bytes = query.to_bytes();
+        tracing::info!(
+            elapsed_ms = t1.elapsed().as_millis(),
+            query_bytes = query_bytes.len(),
+            row_idx,
+            position,
+            "query generated",
+        );
 
+        let t2 = std::time::Instant::now();
         let resp = self
             .http
             .post(format!("{}/query", self.base_url))
@@ -117,11 +143,23 @@ impl WitnessClient {
             .map_err(|e| WitnessClientError::QueryFailed(e.to_string()))?
             .bytes()
             .await?;
+        tracing::info!(
+            elapsed_ms = t2.elapsed().as_millis(),
+            response_bytes = response_bytes.len(),
+            "server response received",
+        );
 
+        let t3 = std::time::Instant::now();
         let decoded_row = self
             .ypir_client
             .decode_response_simplepir(seed, &response_bytes);
+        tracing::info!(
+            elapsed_ms = t3.elapsed().as_millis(),
+            decoded_elements = decoded_row.len(),
+            "response decoded",
+        );
 
+        let t4 = std::time::Instant::now();
         let witness = reconstruct::reconstruct_witness(
             position,
             shard_idx,
@@ -130,6 +168,12 @@ impl WitnessClient {
             &decoded_row,
             &self.broadcast,
         )?;
+        tracing::info!(
+            elapsed_ms = t4.elapsed().as_millis(),
+            total_ms = t0.elapsed().as_millis(),
+            position,
+            "witness reconstructed",
+        );
 
         Ok(witness)
     }
