@@ -219,11 +219,21 @@ pub async fn sync_range(
 pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -> Result<()> {
     let app_state = Arc::new(AppState::new(config.clone(), engine.clone()));
 
-    let router = build_router(app_state.clone());
-    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
-    let http_handle = tokio::spawn(async move {
-        axum::serve(listener, router).await.ok();
-    });
+    // Try to bind early so health checks are available during sync.
+    // Non-fatal: if the port is busy we'll sync + save snapshot and retry.
+    let early_http = match tokio::net::TcpListener::bind(&config.listen_addr).await {
+        Ok(listener) => {
+            tracing::info!(listen = %config.listen_addr, "http server started (sync in progress)");
+            let router = build_router(app_state.clone());
+            Some(tokio::spawn(async move {
+                axum::serve(listener, router).await.ok();
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(addr = %config.listen_addr, error = %e, "port busy, will retry after sync");
+            None
+        }
+    };
 
     let mut client = chain_ingest::LwdClient::connect(&config.lwd_urls)
         .await
@@ -295,6 +305,18 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
     // Save snapshot again after rebuild so warm cache is persisted
     snapshot_io::save_snapshot(&tree, &config.data_dir).await?;
     tracing::info!("snapshot saved with warm cache");
+
+    let http_handle = match early_http {
+        Some(h) => h,
+        None => {
+            let router = build_router(app_state.clone());
+            let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
+            tracing::info!(listen = %config.listen_addr, "http server started");
+            tokio::spawn(async move {
+                axum::serve(listener, router).await.ok();
+            })
+        }
+    };
 
     // Follow mode
     let latest_height = tree.latest_height().unwrap_or(0);
