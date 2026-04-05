@@ -55,7 +55,7 @@ pub fn build_router<P: PirEngine + 'static>(state: Arc<AppState<P>>) -> Router {
 }
 
 /// Build PIR server state from the current hash table and store it in the ArcSwap.
-fn rebuild_pir<P: PirEngine>(
+pub fn rebuild_pir<P: PirEngine>(
     engine: &P,
     hashtable: &HashTableDb,
     scenario: &spend_types::YpirScenario,
@@ -97,7 +97,7 @@ fn rebuild_pir<P: PirEngine>(
 }
 
 /// Sync a block range into the hashtable, reporting progress via `phase`.
-async fn sync_range(
+pub async fn sync_range(
     lwd_urls: &[String],
     from: u64,
     to: u64,

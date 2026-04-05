@@ -415,6 +415,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "combined-server"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "chain-ingest",
+ "clap",
+ "commitment-ingest",
+ "commitment-tree-db",
+ "hashtable-pir",
+ "nf-ingest",
+ "pir-types",
+ "serde",
+ "serde_json",
+ "spend-server",
+ "spend-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "witness-server",
+ "witness-types",
+]
+
+[[package]]
 name = "commitment-ingest"
 version = "0.1.0"
 dependencies = [
