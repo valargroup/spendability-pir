@@ -13,6 +13,7 @@ members = [
     "witness/commitment-tree-db",
     "witness/witness-server",
     "witness/witness-client",
+    "combined-server",
 ]
 
 [profile.release]

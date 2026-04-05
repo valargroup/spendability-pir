@@ -51,7 +51,7 @@ pub fn build_router<P: PirEngine + 'static>(state: Arc<AppState<P>>) -> Router {
 }
 
 /// Build PIR server state from the current commitment tree and store it.
-fn rebuild_pir<P: PirEngine>(
+pub fn rebuild_pir<P: PirEngine>(
     engine: &P,
     tree: &mut CommitmentTreeDb,
     scenario: &pir_types::YpirScenario,
@@ -168,7 +168,7 @@ fn min_sync_height(tip_height: u64) -> u64 {
 }
 
 /// Sync a block range into the tree, reporting progress via `phase`.
-async fn sync_range(
+pub async fn sync_range(
     lwd_urls: &[String],
     from: u64,
     to: u64,
