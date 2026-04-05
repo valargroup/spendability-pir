@@ -4,24 +4,36 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "pir-server"
+name = "spend-server"
 path = "src/main.rs"
 required-features = ["ypir"]
 
 [features]
-default = []
-ypir = ["spend-server/ypir", "witness-server/ypir"]
+default = ["nullifier", "witness"]
+nullifier = [
+    "dep:spend-server",
+    "dep:spend-types",
+    "dep:nf-ingest",
+    "dep:hashtable-pir",
+]
+witness = [
+    "dep:witness-server",
+    "dep:witness-types",
+    "dep:commitment-ingest",
+    "dep:commitment-tree-db",
+]
+ypir = ["spend-server?/ypir", "witness-server?/ypir"]
 
 [dependencies]
-spend-server = { path = "../nullifier/spend-server" }
-witness-server = { path = "../witness/witness-server" }
-spend-types = { path = "../nullifier/spend-types" }
-witness-types = { path = "../witness/witness-types" }
+spend-server = { path = "../nullifier/spend-server", optional = true }
+witness-server = { path = "../witness/witness-server", optional = true }
+spend-types = { path = "../nullifier/spend-types", optional = true }
+witness-types = { path = "../witness/witness-types", optional = true }
 pir-types = { path = "../shared/pir-types" }
-nf-ingest = { path = "../nullifier/nf-ingest" }
-commitment-ingest = { path = "../witness/commitment-ingest" }
-hashtable-pir = { path = "../nullifier/hashtable-pir" }
-commitment-tree-db = { path = "../witness/commitment-tree-db" }
+nf-ingest = { path = "../nullifier/nf-ingest", optional = true }
+commitment-ingest = { path = "../witness/commitment-ingest", optional = true }
+hashtable-pir = { path = "../nullifier/hashtable-pir", optional = true }
+commitment-tree-db = { path = "../witness/commitment-tree-db", optional = true }
 chain-ingest = { path = "../shared/chain-ingest" }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }

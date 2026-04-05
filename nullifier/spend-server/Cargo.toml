@@ -3,11 +3,6 @@ name = "spend-server"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "spend-server"
-path = "src/main.rs"
-required-features = ["ypir"]
-
 [features]
 default = []
 ypir = ["dep:ypir", "dep:spiral-rs"]

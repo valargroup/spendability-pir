@@ -1,5 +1,5 @@
 [Unit]
-Description=Spendability PIR server (spend-server)
+Description=Zcash PIR server (nullifier + witness)
 After=network.target
 
 [Service]

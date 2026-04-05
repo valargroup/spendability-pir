@@ -1,17 +1,22 @@
 use clap::Parser;
-use combined_server::server;
 use pir_types::YpirScenario;
-use spend_server::pir_ypir::YpirPirEngine as NfPirEngine;
-use spend_types::{BUCKET_BYTES, NUM_BUCKETS, TARGET_SIZE};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
+
+#[cfg(feature = "nullifier")]
+use spend_server::pir_ypir::YpirPirEngine as NfPirEngine;
+#[cfg(feature = "nullifier")]
+use spend_types::{BUCKET_BYTES, NUM_BUCKETS, TARGET_SIZE};
+
+#[cfg(feature = "witness")]
 use witness_server::pir_ypir::YpirPirEngine as WitPirEngine;
+#[cfg(feature = "witness")]
 use witness_types::{L0_DB_ROWS, SUBSHARD_ROW_BYTES};
 
 #[derive(Parser)]
-#[command(name = "pir-server", about = "Combined nullifier + witness PIR server")]
+#[command(name = "spend-server", about = "Zcash PIR server")]
 struct Cli {
     /// Directory for snapshots (creates nullifier/ and witness/ subdirectories)
     #[arg(long, default_value = "./data")]
@@ -26,6 +31,7 @@ struct Cli {
     listen: SocketAddr,
 
     /// Target nullifier count before eviction
+    #[cfg(feature = "nullifier")]
     #[arg(long, default_value_t = TARGET_SIZE)]
     target_size: usize,
 
@@ -44,10 +50,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
+    #[cfg(feature = "nullifier")]
     std::fs::create_dir_all(cli.data_dir.join("nullifier"))?;
+    #[cfg(feature = "witness")]
     std::fs::create_dir_all(cli.data_dir.join("witness"))?;
 
-    let config = server::CombinedConfig {
+    let config = combined_server::server::CombinedConfig {
+        #[cfg(feature = "nullifier")]
         target_size: cli.target_size,
         snapshot_interval: cli.snapshot_interval,
         data_dir: cli.data_dir,
@@ -55,27 +64,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen_addr: cli.listen,
     };
 
+    let features: Vec<&str> = vec![
+        #[cfg(feature = "nullifier")]
+        "nullifier",
+        #[cfg(feature = "witness")]
+        "witness",
+    ];
+
     tracing::info!(
         listen = %config.listen_addr,
         lwd_endpoints = ?config.lwd_urls,
-        target_size = config.target_size,
+        subsystems = ?features,
         data_dir = %config.data_dir.display(),
-        "starting combined pir-server",
+        "starting spend-server",
     );
 
-    let nf_scenario = YpirScenario {
-        num_items: NUM_BUCKETS as u64,
-        item_size_bits: (BUCKET_BYTES * 8) as u64,
-    };
-    let wit_scenario = YpirScenario {
-        num_items: L0_DB_ROWS as u64,
-        item_size_bits: (SUBSHARD_ROW_BYTES * 8) as u64,
+    #[cfg(feature = "nullifier")]
+    let nf_engine = {
+        let nf_scenario = YpirScenario {
+            num_items: NUM_BUCKETS as u64,
+            item_size_bits: (BUCKET_BYTES * 8) as u64,
+        };
+        Arc::new(NfPirEngine::new(&nf_scenario))
     };
 
-    let nf_engine = Arc::new(NfPirEngine::new(&nf_scenario));
-    let wit_engine = Arc::new(WitPirEngine::new(&wit_scenario));
+    #[cfg(feature = "witness")]
+    let wit_engine = {
+        let wit_scenario = YpirScenario {
+            num_items: L0_DB_ROWS as u64,
+            item_size_bits: (SUBSHARD_ROW_BYTES * 8) as u64,
+        };
+        Arc::new(WitPirEngine::new(&wit_scenario))
+    };
 
-    server::run(config, nf_engine, wit_engine).await?;
+    combined_server::server::run(
+        config,
+        #[cfg(feature = "nullifier")]
+        nf_engine,
+        #[cfg(feature = "witness")]
+        wit_engine,
+    )
+    .await?;
 
     Ok(())
 }

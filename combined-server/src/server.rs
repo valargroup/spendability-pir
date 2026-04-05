@@ -4,21 +4,28 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use chain_ingest::{ChainAction, ChainTracker, LwdClient};
-use commitment_tree_db::CommitmentTreeDb;
-use hashtable_pir::HashTableDb;
 use pir_types::{PirEngine, ServerPhase, CONFIRMATION_DEPTH};
 use serde::Serialize;
-use spend_types::{BUCKET_BYTES, NUM_BUCKETS};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+
+#[cfg(feature = "nullifier")]
+use hashtable_pir::HashTableDb;
+#[cfg(feature = "nullifier")]
+use spend_types::{BUCKET_BYTES, NUM_BUCKETS};
+
+#[cfg(feature = "witness")]
+use commitment_tree_db::CommitmentTreeDb;
+#[cfg(feature = "witness")]
 use witness_types::{L0_DB_ROWS, SUBSHARD_ROW_BYTES};
 
 const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct CombinedConfig {
+    #[cfg(feature = "nullifier")]
     pub target_size: usize,
     pub snapshot_interval: u64,
     pub data_dir: PathBuf,
@@ -28,12 +35,15 @@ pub struct CombinedConfig {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
+    #[cfg(feature = "nullifier")]
     #[error("nullifier server error: {0}")]
     Nullifier(#[from] spend_server::server::ServerError),
+    #[cfg(feature = "witness")]
     #[error("witness server error: {0}")]
     Witness(#[from] witness_server::server::ServerError),
     #[error("chain client error: {0}")]
     Client(#[from] chain_ingest::ClientError),
+    #[cfg(feature = "nullifier")]
     #[error("hashtable error: {0}")]
     HashTable(#[from] hashtable_pir::HashTableError),
     #[error("io error: {0}")]
@@ -43,13 +53,17 @@ pub enum ServerError {
 pub type Result<T> = std::result::Result<T, ServerError>;
 
 struct CombinedHealthState {
+    #[cfg(feature = "nullifier")]
     nf_phase: Arc<arc_swap::ArcSwap<ServerPhase>>,
+    #[cfg(feature = "witness")]
     wit_phase: Arc<arc_swap::ArcSwap<ServerPhase>>,
 }
 
 #[derive(Serialize)]
 struct CombinedHealthResponse {
+    #[cfg(feature = "nullifier")]
     nullifier: SubsystemHealth,
+    #[cfg(feature = "witness")]
     witness: SubsystemHealth,
 }
 
@@ -62,51 +76,54 @@ struct SubsystemHealth {
     target_height: Option<u64>,
 }
 
+fn phase_to_health(phase: &ServerPhase) -> SubsystemHealth {
+    match phase {
+        ServerPhase::Serving => SubsystemHealth {
+            phase: "serving".into(),
+            current_height: None,
+            target_height: None,
+        },
+        ServerPhase::Syncing {
+            current_height,
+            target_height,
+        } => SubsystemHealth {
+            phase: "syncing".into(),
+            current_height: Some(*current_height),
+            target_height: Some(*target_height),
+        },
+    }
+}
+
 async fn combined_health(State(state): State<Arc<CombinedHealthState>>) -> impl IntoResponse {
-    let nf_phase = state.nf_phase.load();
-    let wit_phase = state.wit_phase.load();
+    #[allow(unused_mut)]
+    let mut all_serving = true;
 
-    let nf_health = match nf_phase.as_ref() {
-        ServerPhase::Serving => SubsystemHealth {
-            phase: "serving".into(),
-            current_height: None,
-            target_height: None,
-        },
-        ServerPhase::Syncing {
-            current_height,
-            target_height,
-        } => SubsystemHealth {
-            phase: "syncing".into(),
-            current_height: Some(*current_height),
-            target_height: Some(*target_height),
-        },
+    #[cfg(feature = "nullifier")]
+    let nf_health = {
+        let nf_phase = state.nf_phase.load();
+        if !matches!(nf_phase.as_ref(), ServerPhase::Serving) {
+            all_serving = false;
+        }
+        phase_to_health(&nf_phase)
     };
 
-    let wit_health = match wit_phase.as_ref() {
-        ServerPhase::Serving => SubsystemHealth {
-            phase: "serving".into(),
-            current_height: None,
-            target_height: None,
-        },
-        ServerPhase::Syncing {
-            current_height,
-            target_height,
-        } => SubsystemHealth {
-            phase: "syncing".into(),
-            current_height: Some(*current_height),
-            target_height: Some(*target_height),
-        },
+    #[cfg(feature = "witness")]
+    let wit_health = {
+        let wit_phase = state.wit_phase.load();
+        if !matches!(wit_phase.as_ref(), ServerPhase::Serving) {
+            all_serving = false;
+        }
+        phase_to_health(&wit_phase)
     };
-
-    let both_serving = matches!(nf_phase.as_ref(), ServerPhase::Serving)
-        && matches!(wit_phase.as_ref(), ServerPhase::Serving);
 
     let body = CombinedHealthResponse {
+        #[cfg(feature = "nullifier")]
         nullifier: nf_health,
+        #[cfg(feature = "witness")]
         witness: wit_health,
     };
 
-    let status = if both_serving {
+    let status = if all_serving {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -116,71 +133,100 @@ async fn combined_health(State(state): State<Arc<CombinedHealthState>>) -> impl 
 }
 
 /// Main entry point for the combined PIR server.
-pub async fn run<NfP, WitP>(
+pub async fn run<
+    #[cfg(feature = "nullifier")] NfP: PirEngine + 'static,
+    #[cfg(feature = "witness")] WitP: PirEngine + 'static,
+>(
     config: CombinedConfig,
-    nf_engine: Arc<NfP>,
-    wit_engine: Arc<WitP>,
-) -> Result<()>
-where
-    NfP: PirEngine + 'static,
-    WitP: PirEngine + 'static,
-{
-    let nf_data_dir = config.data_dir.join("nullifier");
-    let wit_data_dir = config.data_dir.join("witness");
+    #[cfg(feature = "nullifier")] nf_engine: Arc<NfP>,
+    #[cfg(feature = "witness")] wit_engine: Arc<WitP>,
+) -> Result<()> {
+    // --- Sync phase ---
 
-    let nf_config = spend_server::state::ServerConfig {
-        target_size: config.target_size,
-        confirmation_depth: CONFIRMATION_DEPTH,
-        snapshot_interval: config.snapshot_interval,
-        data_dir: nf_data_dir.clone(),
-        lwd_urls: config.lwd_urls.clone(),
-        listen_addr: config.listen_addr,
+    #[cfg(feature = "nullifier")]
+    let nf_config = {
+        let nf_data_dir = config.data_dir.join("nullifier");
+        spend_server::state::ServerConfig {
+            target_size: config.target_size,
+            confirmation_depth: CONFIRMATION_DEPTH,
+            snapshot_interval: config.snapshot_interval,
+            data_dir: nf_data_dir,
+            lwd_urls: config.lwd_urls.clone(),
+            listen_addr: config.listen_addr,
+        }
     };
 
-    let wit_config = witness_server::state::ServerConfig {
-        snapshot_interval: config.snapshot_interval,
-        data_dir: wit_data_dir.clone(),
-        lwd_urls: config.lwd_urls.clone(),
-        listen_addr: config.listen_addr,
+    #[cfg(feature = "witness")]
+    let wit_config = {
+        let wit_data_dir = config.data_dir.join("witness");
+        witness_server::state::ServerConfig {
+            snapshot_interval: config.snapshot_interval,
+            data_dir: wit_data_dir,
+            lwd_urls: config.lwd_urls.clone(),
+            listen_addr: config.listen_addr,
+        }
     };
 
-    // Run both sync phases concurrently. Each creates its own LwdClient
-    // and uses its subsystem-specific sync strategy.
-    tracing::info!("starting concurrent sync for nullifier and witness subsystems");
+    tracing::info!("starting sync for enabled subsystems");
 
-    let nf_sync = spend_server::server::run_sync_only(nf_config.clone(), nf_engine.clone());
-    let wit_sync = witness_server::server::run_sync_only(wit_config.clone(), wit_engine.clone());
+    #[cfg(all(feature = "nullifier", feature = "witness"))]
+    let ((nf_state, mut hashtable), (wit_state, mut tree)) = {
+        let nf_sync =
+            spend_server::server::run_sync_only(nf_config.clone(), nf_engine.clone());
+        let wit_sync =
+            witness_server::server::run_sync_only(wit_config.clone(), wit_engine.clone());
+        let (nf_result, wit_result) = tokio::join!(nf_sync, wit_sync);
+        (
+            nf_result.map_err(ServerError::Nullifier)?,
+            wit_result.map_err(ServerError::Witness)?,
+        )
+    };
 
-    let (nf_result, wit_result) = tokio::join!(nf_sync, wit_sync);
+    #[cfg(all(feature = "nullifier", not(feature = "witness")))]
+    let (nf_state, mut hashtable) = {
+        spend_server::server::run_sync_only(nf_config.clone(), nf_engine.clone())
+            .await
+            .map_err(ServerError::Nullifier)?
+    };
 
-    let (nf_state, mut hashtable) = nf_result.map_err(ServerError::Nullifier)?;
-    let (wit_state, mut tree) = wit_result.map_err(ServerError::Witness)?;
+    #[cfg(all(feature = "witness", not(feature = "nullifier")))]
+    let (wit_state, mut tree) = {
+        witness_server::server::run_sync_only(wit_config.clone(), wit_engine.clone())
+            .await
+            .map_err(ServerError::Witness)?
+    };
 
-    tracing::info!(
-        nf_height = hashtable.latest_height(),
-        nf_nullifiers = hashtable.len(),
-        wit_height = tree.latest_height(),
-        wit_tree_size = tree.tree_size(),
-        "both subsystems synced, building combined router",
-    );
+    tracing::info!("sync complete, building router");
 
-    // Build combined router: subsystem routes under prefixes, shared health at root
+    // --- Build router ---
+
     let health_state = Arc::new(CombinedHealthState {
+        #[cfg(feature = "nullifier")]
         nf_phase: Arc::new(arc_swap::ArcSwap::from_pointee(ServerPhase::Serving)),
+        #[cfg(feature = "witness")]
         wit_phase: Arc::new(arc_swap::ArcSwap::from_pointee(ServerPhase::Serving)),
     });
 
-    let router = Router::new()
+    #[allow(unused_mut)]
+    let mut router = Router::new()
         .route("/health", get(combined_health))
-        .with_state(health_state)
-        .nest(
+        .with_state(health_state);
+
+    #[cfg(feature = "nullifier")]
+    {
+        router = router.nest(
             "/nullifier",
             spend_server::server::build_router(nf_state.clone()),
-        )
-        .nest(
+        );
+    }
+
+    #[cfg(feature = "witness")]
+    {
+        router = router.nest(
             "/witness",
             witness_server::server::build_router(wit_state.clone()),
         );
+    }
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!(listen = %config.listen_addr, "http server started");
@@ -188,28 +234,42 @@ where
         axum::serve(listener, router).await.ok();
     });
 
-    // Unified follow loop: single lightwalletd connection, dual dispatch
-    let nf_latest = hashtable.latest_height().unwrap_or(0);
-    let wit_latest = tree.latest_height().unwrap_or(0);
+    // --- Follow loop ---
 
-    // If the two subsystems ended at different heights, catch up the one
-    // that's behind. This uses their respective sync functions.
-    match nf_latest.cmp(&wit_latest) {
-        std::cmp::Ordering::Less => {
-            tracing::info!(
-                from = nf_latest + 1,
-                to = wit_latest,
-                "catching up nullifier subsystem"
-            );
+    // Determine the starting height from whichever subsystem(s) are enabled.
+    #[allow(unused_mut)]
+    let mut follow_height: u64 = 0;
+    #[allow(unused_mut)]
+    let mut follow_hash: [u8; 32] = [0u8; 32];
+
+    #[cfg(feature = "nullifier")]
+    {
+        let h = hashtable.latest_height().unwrap_or(0);
+        if h > follow_height {
+            follow_height = h;
+            follow_hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
+        }
+    }
+
+    #[cfg(feature = "witness")]
+    {
+        let h = tree.latest_height().unwrap_or(0);
+        if h > follow_height {
+            follow_height = h;
+        }
+    }
+
+    // Catch up the subsystem that's behind (only when both are enabled).
+    #[cfg(all(feature = "nullifier", feature = "witness"))]
+    {
+        let nf_latest = hashtable.latest_height().unwrap_or(0);
+        let wit_latest = tree.latest_height().unwrap_or(0);
+        if nf_latest < wit_latest {
+            tracing::info!(from = nf_latest + 1, to = wit_latest, "catching up nullifier");
             catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable)
                 .await?;
-        }
-        std::cmp::Ordering::Greater => {
-            tracing::info!(
-                from = wit_latest + 1,
-                to = nf_latest,
-                "catching up witness subsystem"
-            );
+        } else if wit_latest < nf_latest {
+            tracing::info!(from = wit_latest + 1, to = nf_latest, "catching up witness");
             let ts = if tree.tree_size() > 0 {
                 Some(tree.tree_size() as u32)
             } else {
@@ -217,18 +277,19 @@ where
             };
             catch_up_witness(&config.lwd_urls, wit_latest + 1, nf_latest, &mut tree, ts).await?;
         }
-        std::cmp::Ordering::Equal => {}
+        follow_height = hashtable.latest_height().unwrap_or(0);
+        follow_hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
     }
 
-    let follow_height = hashtable.latest_height().unwrap_or(0);
-    let follow_hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
+    tracing::info!(height = follow_height, "entering follow mode");
 
-    tracing::info!(height = follow_height, "entering unified follow mode");
-
+    #[cfg(feature = "nullifier")]
     let nf_scenario = pir_types::YpirScenario {
         num_items: NUM_BUCKETS as u64,
         item_size_bits: (BUCKET_BYTES * 8) as u64,
     };
+
+    #[cfg(feature = "witness")]
     let wit_scenario = pir_types::YpirScenario {
         num_items: L0_DB_ROWS as u64,
         item_size_bits: (SUBSHARD_ROW_BYTES * 8) as u64,
@@ -256,89 +317,110 @@ where
             let height = block.height;
             let hash = to_hash_array(&block.hash);
             let prev_hash = to_hash_array(&block.prev_hash);
+
+            #[cfg(feature = "nullifier")]
             let nullifiers = nf_ingest::extract_nullifiers(block);
+            #[cfg(feature = "witness")]
             let commitments = commitment_ingest::extract_commitments(block);
+
             match tracker.push_block(height, hash, prev_hash) {
                 ChainAction::Extend => {
-                    // Nullifier subsystem
-                    if let Err(e) = hashtable.insert_block(height, hash, &nullifiers) {
-                        tracing::warn!(height, error = %e, "nullifier insert failed");
+                    #[cfg(feature = "nullifier")]
+                    {
+                        if let Err(e) = hashtable.insert_block(height, hash, &nullifiers) {
+                            tracing::warn!(height, error = %e, "nullifier insert failed");
+                        }
+                        hashtable.evict_to_target();
                     }
-                    hashtable.evict_to_target();
 
-                    // Witness subsystem
-                    tree.append_commitments(height, hash, &commitments);
+                    #[cfg(feature = "witness")]
+                    {
+                        tree.append_commitments(height, hash, &commitments);
+                    }
 
                     current_height = height;
                     blocks_since_snapshot += 1;
 
-                    tracing::info!(
-                        height,
-                        nfs = nullifiers.len(),
-                        cmx = commitments.len(),
-                        tree_size = tree.tree_size(),
-                        "new block",
-                    );
+                    #[cfg(all(feature = "nullifier", feature = "witness"))]
+                    tracing::info!(height, nfs = nullifiers.len(), cmx = commitments.len(), tree_size = tree.tree_size(), "new block");
+                    #[cfg(all(feature = "nullifier", not(feature = "witness")))]
+                    tracing::info!(height, nfs = nullifiers.len(), "new block");
+                    #[cfg(all(feature = "witness", not(feature = "nullifier")))]
+                    tracing::info!(height, cmx = commitments.len(), tree_size = tree.tree_size(), "new block");
                 }
                 ChainAction::Reorg { rollback_to } => {
-                    // Roll back nullifier: remove blocks above rollback_to by hash
-                    while hashtable.latest_height().is_some_and(|h| h > rollback_to) {
-                        if let Some(bh) = hashtable.latest_block_hash() {
-                            if let Err(e) = hashtable.rollback_block(&bh) {
-                                tracing::warn!(error = %e, "nullifier rollback failed");
+                    #[cfg(feature = "nullifier")]
+                    {
+                        while hashtable.latest_height().map_or(false, |h| h > rollback_to) {
+                            if let Some(bh) = hashtable.latest_block_hash() {
+                                if let Err(e) = hashtable.rollback_block(&bh) {
+                                    tracing::warn!(error = %e, "nullifier rollback failed");
+                                    break;
+                                }
+                            } else {
                                 break;
                             }
-                        } else {
-                            break;
+                        }
+                        if let Err(e) = hashtable.insert_block(height, hash, &nullifiers) {
+                            tracing::warn!(height, error = %e, "nullifier insert after reorg failed");
                         }
                     }
 
-                    // Roll back witness
-                    tree.rollback_to(rollback_to);
-
-                    // Insert the new block into both
-                    if let Err(e) = hashtable.insert_block(height, hash, &nullifiers) {
-                        tracing::warn!(height, error = %e, "nullifier insert after reorg failed");
+                    #[cfg(feature = "witness")]
+                    {
+                        tree.rollback_to(rollback_to);
+                        tree.append_commitments(height, hash, &commitments);
                     }
-                    tree.append_commitments(height, hash, &commitments);
 
                     current_height = height;
                     blocks_since_snapshot += 1;
-                    tracing::info!(
-                        rollback_to,
-                        new_height = height,
-                        tree_size = tree.tree_size(),
-                        "reorg handled",
-                    );
+                    #[cfg(feature = "witness")]
+                    tracing::info!(rollback_to, new_height = height, tree_size = tree.tree_size(), "reorg handled");
+                    #[cfg(not(feature = "witness"))]
+                    tracing::info!(rollback_to, new_height = height, "reorg handled");
                 }
             }
         }
 
-        // Rebuild both PIR databases
-        let nf_pir = spend_server::server::rebuild_pir(&*nf_engine, &hashtable, &nf_scenario)
-            .map_err(ServerError::Nullifier)?;
-        nf_state.live_pir.store(Arc::new(Some(nf_pir)));
-
-        let anchor_height = tree.latest_height().unwrap_or(0);
-        let wit_pir = witness_server::server::rebuild_pir(
-            &*wit_engine,
-            &mut tree,
-            &wit_scenario,
-            anchor_height,
-        )
-        .map_err(ServerError::Witness)?;
-        wit_state.live_pir.store(Arc::new(Some(wit_pir)));
-
-        // Periodic snapshots for both
-        if blocks_since_snapshot >= config.snapshot_interval {
-            spend_server::snapshot_io::save_snapshot(&hashtable, &nf_data_dir)
-                .await
-                .map_err(spend_server::server::ServerError::from)
+        // Rebuild PIR databases
+        #[cfg(feature = "nullifier")]
+        {
+            let nf_pir = spend_server::server::rebuild_pir(&*nf_engine, &hashtable, &nf_scenario)
                 .map_err(ServerError::Nullifier)?;
-            witness_server::snapshot_io::save_snapshot(&tree, &wit_data_dir)
-                .await
-                .map_err(witness_server::server::ServerError::from)
-                .map_err(ServerError::Witness)?;
+            nf_state.live_pir.store(Arc::new(Some(nf_pir)));
+        }
+
+        #[cfg(feature = "witness")]
+        {
+            let anchor_height = tree.latest_height().unwrap_or(0);
+            let wit_pir = witness_server::server::rebuild_pir(
+                &*wit_engine,
+                &mut tree,
+                &wit_scenario,
+                anchor_height,
+            )
+            .map_err(ServerError::Witness)?;
+            wit_state.live_pir.store(Arc::new(Some(wit_pir)));
+        }
+
+        // Periodic snapshots
+        if blocks_since_snapshot >= config.snapshot_interval {
+            #[cfg(feature = "nullifier")]
+            {
+                let nf_data_dir = config.data_dir.join("nullifier");
+                spend_server::snapshot_io::save_snapshot(&hashtable, &nf_data_dir)
+                    .await
+                    .map_err(spend_server::server::ServerError::from)
+                    .map_err(ServerError::Nullifier)?;
+            }
+            #[cfg(feature = "witness")]
+            {
+                let wit_data_dir = config.data_dir.join("witness");
+                witness_server::snapshot_io::save_snapshot(&tree, &wit_data_dir)
+                    .await
+                    .map_err(witness_server::server::ServerError::from)
+                    .map_err(ServerError::Witness)?;
+            }
             blocks_since_snapshot = 0;
             tracing::info!("periodic snapshots saved");
         }
@@ -347,7 +429,7 @@ where
     }
 }
 
-/// Catch up the nullifier subsystem to a target height.
+#[cfg(feature = "nullifier")]
 async fn catch_up_nullifier(
     lwd_urls: &[String],
     from: u64,
@@ -362,7 +444,7 @@ async fn catch_up_nullifier(
     Ok(())
 }
 
-/// Catch up the witness subsystem to a target height.
+#[cfg(feature = "witness")]
 async fn catch_up_witness(
     lwd_urls: &[String],
     from: u64,
