@@ -9,7 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  RUSTFLAGS: -Dwarnings -C target-cpu=x86-64-v3
 
 jobs:
   changes:
