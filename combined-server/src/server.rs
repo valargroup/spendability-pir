@@ -194,25 +194,30 @@ where
 
     // If the two subsystems ended at different heights, catch up the one
     // that's behind. This uses their respective sync functions.
-    if nf_latest < wit_latest {
-        tracing::info!(
-            from = nf_latest + 1,
-            to = wit_latest,
-            "catching up nullifier subsystem"
-        );
-        catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable).await?;
-    } else if wit_latest < nf_latest {
-        tracing::info!(
-            from = wit_latest + 1,
-            to = nf_latest,
-            "catching up witness subsystem"
-        );
-        let ts = if tree.tree_size() > 0 {
-            Some(tree.tree_size() as u32)
-        } else {
-            None
-        };
-        catch_up_witness(&config.lwd_urls, wit_latest + 1, nf_latest, &mut tree, ts).await?;
+    match nf_latest.cmp(&wit_latest) {
+        std::cmp::Ordering::Less => {
+            tracing::info!(
+                from = nf_latest + 1,
+                to = wit_latest,
+                "catching up nullifier subsystem"
+            );
+            catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable)
+                .await?;
+        }
+        std::cmp::Ordering::Greater => {
+            tracing::info!(
+                from = wit_latest + 1,
+                to = nf_latest,
+                "catching up witness subsystem"
+            );
+            let ts = if tree.tree_size() > 0 {
+                Some(tree.tree_size() as u32)
+            } else {
+                None
+            };
+            catch_up_witness(&config.lwd_urls, wit_latest + 1, nf_latest, &mut tree, ts).await?;
+        }
+        std::cmp::Ordering::Equal => {}
     }
 
     let follow_height = hashtable.latest_height().unwrap_or(0);
@@ -277,7 +282,7 @@ where
                 }
                 ChainAction::Reorg { rollback_to } => {
                     // Roll back nullifier: remove blocks above rollback_to by hash
-                    while hashtable.latest_height().map_or(false, |h| h > rollback_to) {
+                    while hashtable.latest_height().is_some_and(|h| h > rollback_to) {
                         if let Some(bh) = hashtable.latest_block_hash() {
                             if let Err(e) = hashtable.rollback_block(&bh) {
                                 tracing::warn!(error = %e, "nullifier rollback failed");
