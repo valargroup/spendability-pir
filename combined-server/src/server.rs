@@ -236,52 +236,51 @@ pub async fn run<
     // --- Follow loop ---
 
     // Determine the starting height from whichever subsystem(s) are enabled.
-    #[allow(unused_mut)]
-    let mut follow_height: u64 = 0;
-    #[allow(unused_mut)]
-    let mut follow_hash: [u8; 32] = [0u8; 32];
-
-    #[cfg(feature = "nullifier")]
-    {
-        let h = hashtable.latest_height().unwrap_or(0);
-        if h > follow_height {
-            follow_height = h;
-            follow_hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
-        }
-    }
-
-    #[cfg(feature = "witness")]
-    {
-        let h = tree.latest_height().unwrap_or(0);
-        if h > follow_height {
-            follow_height = h;
-        }
-    }
-
-    // Catch up the subsystem that's behind (only when both are enabled).
+    // Determine the starting height/hash from whichever subsystem(s) are enabled.
+    // When both are enabled, catch up the one that's behind first.
     #[cfg(all(feature = "nullifier", feature = "witness"))]
-    {
+    let (follow_height, follow_hash) = {
         let nf_latest = hashtable.latest_height().unwrap_or(0);
         let wit_latest = tree.latest_height().unwrap_or(0);
-        if nf_latest < wit_latest {
-            tracing::info!(
-                from = nf_latest + 1,
-                to = wit_latest,
-                "catching up nullifier"
-            );
-            catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable).await?;
-        } else if wit_latest < nf_latest {
-            tracing::info!(from = wit_latest + 1, to = nf_latest, "catching up witness");
-            let ts = if tree.tree_size() > 0 {
-                Some(tree.tree_size() as u32)
-            } else {
-                None
-            };
-            catch_up_witness(&config.lwd_urls, wit_latest + 1, nf_latest, &mut tree, ts).await?;
+        match nf_latest.cmp(&wit_latest) {
+            std::cmp::Ordering::Less => {
+                tracing::info!(
+                    from = nf_latest + 1,
+                    to = wit_latest,
+                    "catching up nullifier subsystem"
+                );
+                catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable)
+                    .await?;
+            }
+            std::cmp::Ordering::Greater => {
+                tracing::info!(from = wit_latest + 1, to = nf_latest, "catching up witness");
+                let ts = if tree.tree_size() > 0 {
+                    Some(tree.tree_size() as u32)
+                } else {
+                    None
+                };
+                catch_up_witness(&config.lwd_urls, wit_latest + 1, nf_latest, &mut tree, ts)
+                    .await?;
+            }
+            std::cmp::Ordering::Equal => {}
         }
-        follow_height = hashtable.latest_height().unwrap_or(0);
-        follow_hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
-    }
+        let h = hashtable.latest_height().unwrap_or(0);
+        let hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
+        (h, hash)
+    };
+
+    #[cfg(all(feature = "nullifier", not(feature = "witness")))]
+    let (follow_height, follow_hash) = {
+        let h = hashtable.latest_height().unwrap_or(0);
+        let hash = hashtable.latest_block_hash().unwrap_or([0u8; 32]);
+        (h, hash)
+    };
+
+    #[cfg(all(feature = "witness", not(feature = "nullifier")))]
+    let (follow_height, follow_hash) = {
+        let h = tree.latest_height().unwrap_or(0);
+        (h, [0u8; 32])
+    };
 
     tracing::info!(height = follow_height, "entering follow mode");
 
@@ -364,7 +363,7 @@ pub async fn run<
                 ChainAction::Reorg { rollback_to } => {
                     #[cfg(feature = "nullifier")]
                     {
-                        while hashtable.latest_height().map_or(false, |h| h > rollback_to) {
+                        while hashtable.latest_height().is_some_and(|h| h > rollback_to) {
                             if let Some(bh) = hashtable.latest_block_hash() {
                                 if let Err(e) = hashtable.rollback_block(&bh) {
                                     tracing::warn!(error = %e, "nullifier rollback failed");
