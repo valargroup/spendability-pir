@@ -171,8 +171,7 @@ pub async fn run<
 
     #[cfg(all(feature = "nullifier", feature = "witness"))]
     let ((nf_state, mut hashtable), (wit_state, mut tree)) = {
-        let nf_sync =
-            spend_server::server::run_sync_only(nf_config.clone(), nf_engine.clone());
+        let nf_sync = spend_server::server::run_sync_only(nf_config.clone(), nf_engine.clone());
         let wit_sync =
             witness_server::server::run_sync_only(wit_config.clone(), wit_engine.clone());
         let (nf_result, wit_result) = tokio::join!(nf_sync, wit_sync);
@@ -265,9 +264,12 @@ pub async fn run<
         let nf_latest = hashtable.latest_height().unwrap_or(0);
         let wit_latest = tree.latest_height().unwrap_or(0);
         if nf_latest < wit_latest {
-            tracing::info!(from = nf_latest + 1, to = wit_latest, "catching up nullifier");
-            catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable)
-                .await?;
+            tracing::info!(
+                from = nf_latest + 1,
+                to = wit_latest,
+                "catching up nullifier"
+            );
+            catch_up_nullifier(&config.lwd_urls, nf_latest + 1, wit_latest, &mut hashtable).await?;
         } else if wit_latest < nf_latest {
             tracing::info!(from = wit_latest + 1, to = nf_latest, "catching up witness");
             let ts = if tree.tree_size() > 0 {
@@ -342,11 +344,22 @@ pub async fn run<
                     blocks_since_snapshot += 1;
 
                     #[cfg(all(feature = "nullifier", feature = "witness"))]
-                    tracing::info!(height, nfs = nullifiers.len(), cmx = commitments.len(), tree_size = tree.tree_size(), "new block");
+                    tracing::info!(
+                        height,
+                        nfs = nullifiers.len(),
+                        cmx = commitments.len(),
+                        tree_size = tree.tree_size(),
+                        "new block"
+                    );
                     #[cfg(all(feature = "nullifier", not(feature = "witness")))]
                     tracing::info!(height, nfs = nullifiers.len(), "new block");
                     #[cfg(all(feature = "witness", not(feature = "nullifier")))]
-                    tracing::info!(height, cmx = commitments.len(), tree_size = tree.tree_size(), "new block");
+                    tracing::info!(
+                        height,
+                        cmx = commitments.len(),
+                        tree_size = tree.tree_size(),
+                        "new block"
+                    );
                 }
                 ChainAction::Reorg { rollback_to } => {
                     #[cfg(feature = "nullifier")]
@@ -375,7 +388,12 @@ pub async fn run<
                     current_height = height;
                     blocks_since_snapshot += 1;
                     #[cfg(feature = "witness")]
-                    tracing::info!(rollback_to, new_height = height, tree_size = tree.tree_size(), "reorg handled");
+                    tracing::info!(
+                        rollback_to,
+                        new_height = height,
+                        tree_size = tree.tree_size(),
+                        "reorg handled"
+                    );
                     #[cfg(not(feature = "witness"))]
                     tracing::info!(rollback_to, new_height = height, "reorg handled");
                 }

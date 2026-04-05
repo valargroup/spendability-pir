@@ -1,0 +1,68 @@
+=== Spend-server monitor ===
+Started: Tue Mar 31 17:09:00 UTC 2026
+Server PID: 1175418
+Duration: 60min, interval: 60s
+---
+17:09:00 | h=3291875 nfs=122963 phase=Serving rss=1184MB
+17:10:00 | h=3291875 nfs=122963 phase=Serving rss=1184MB
+17:11:00 | h=3291876 nfs=122970 phase=Serving rss=1184MB
+17:12:00 | h=3291877 nfs=122976 phase=Serving rss=1184MB
+17:13:00 | h=3291877 nfs=122976 phase=Serving rss=1184MB
+17:14:00 | h=3291877 nfs=122976 phase=Serving rss=1184MB
+17:15:01 | h=3291879 nfs=122986 phase=Serving rss=1184MB
+17:16:01 | h=3291879 nfs=122986 phase=Serving rss=1184MB
+17:17:01 | h=3291880 nfs=122986 phase=Serving rss=1184MB
+17:18:01 | h=3291881 nfs=122986 phase=Serving rss=1184MB
+17:19:01 | h=3291883 nfs=122986 phase=Serving rss=1184MB
+17:20:01 | h=3291883 nfs=122986 phase=Serving rss=1184MB
+17:21:01 | h=3291883 nfs=122986 phase=Serving rss=1184MB
+17:22:01 | h=3291883 nfs=122986 phase=Serving rss=1184MB
+17:23:01 | h=3291883 nfs=122986 phase=Serving rss=1184MB
+17:24:01 | h=3291883 nfs=122986 phase=Serving rss=1184MB
+17:25:02 | h=3291884 nfs=123021 phase=Serving rss=1185MB
+17:26:02 | h=3291886 nfs=123030 phase=Serving rss=1185MB
+17:27:02 | h=3291886 nfs=123030 phase=Serving rss=1185MB
+17:28:02 | h=3291886 nfs=123030 phase=Serving rss=1185MB
+17:29:02 | h=3291886 nfs=123030 phase=Serving rss=1185MB
+17:30:02 | h=3291886 nfs=123030 phase=Serving rss=1185MB
+17:31:02 | h=3291888 nfs=123034 phase=Serving rss=1185MB
+17:32:02 | h=3291889 nfs=123036 phase=Serving rss=1185MB
+17:33:02 | h=3291890 nfs=123046 phase=Serving rss=1186MB
+17:34:02 | h=3291891 nfs=123048 phase=Serving rss=1186MB
+17:35:03 | h=3291892 nfs=123050 phase=Serving rss=1186MB
+17:36:03 | h=3291893 nfs=123052 phase=Serving rss=1186MB
+17:37:03 | h=3291893 nfs=123052 phase=Serving rss=1186MB
+17:38:03 | h=3291893 nfs=123052 phase=Serving rss=1186MB
+17:39:03 | h=3291893 nfs=123052 phase=Serving rss=1186MB
+17:40:03 | h=3291894 nfs=123066 phase=Serving rss=1186MB
+17:41:03 | h=3291895 nfs=123068 phase=Serving rss=1186MB
+17:42:03 | h=3291896 nfs=123073 phase=Serving rss=1187MB
+17:43:03 | h=3291896 nfs=123073 phase=Serving rss=1187MB
+17:44:03 | h=3291896 nfs=123073 phase=Serving rss=1187MB
+17:45:03 | h=3291896 nfs=123073 phase=Serving rss=1187MB
+17:46:04 | h=3291896 nfs=123073 phase=Serving rss=1187MB
+17:47:04 | h=3291897 nfs=123081 phase=Serving rss=1187MB
+17:48:04 | h=3291898 nfs=123081 phase=Serving rss=1187MB
+17:49:04 | h=3291899 nfs=123081 phase=Serving rss=1187MB
+17:50:04 | h=3291899 nfs=123081 phase=Serving rss=1187MB
+17:51:04 | h=3291899 nfs=123081 phase=Serving rss=1187MB
+17:52:04 | h=3291899 nfs=123081 phase=Serving rss=1187MB
+17:53:04 | h=3291899 nfs=123081 phase=Serving rss=1187MB
+17:54:04 | h=3291899 nfs=123081 phase=Serving rss=1187MB
+17:55:04 | h=3291901 nfs=123094 phase=Serving rss=1187MB
+17:56:05 | h=3291902 nfs=123094 phase=Serving rss=1187MB
+17:57:05 | h=3291902 nfs=123094 phase=Serving rss=1187MB
+17:58:05 | h=3291903 nfs=123098 phase=Serving rss=1187MB
+17:59:05 | h=3291905 nfs=123102 phase=Serving rss=1187MB
+18:00:05 | h=3291906 nfs=123107 phase=Serving rss=1188MB
+18:01:05 | h=3291907 nfs=123107 phase=Serving rss=1188MB
+18:02:05 | h=3291907 nfs=123107 phase=Serving rss=1188MB
+18:03:05 | h=3291907 nfs=123107 phase=Serving rss=1188MB
+18:04:05 | h=3291909 nfs=123111 phase=Serving rss=1188MB
+18:05:05 | h=3291909 nfs=123111 phase=Serving rss=1188MB
+18:06:06 | h=3291911 nfs=123113 phase=Serving rss=1188MB
+18:07:06 | h=3291912 nfs=123117 phase=Serving rss=1189MB
+18:08:06 | h=3291913 nfs=123117 phase=Serving rss=1189MB
+---
+Finished: Tue Mar 31 18:09:06 UTC 2026
+RESULT: Server survived 60 minutes
