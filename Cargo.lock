@@ -431,12 +431,14 @@ dependencies = [
  "serde_json",
  "spend-server",
  "spend-types",
+ "spiral-rs",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "witness-server",
  "witness-types",
+ "ypir",
 ]
 
 [[package]]
