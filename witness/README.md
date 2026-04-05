@@ -490,17 +490,79 @@ Same as Test A but through the real YPIR pipeline: server builds database, clien
 
 **What these prove**: tree construction correctness, sub-shard decomposition, witness reconstruction, anchor root agreement with chain state, `PirWitness` compatibility with `ShardTree`, and (Test B) YPIR encode/decode fidelity.
 
-## Wallet integration (future scope)
+## Wallet integration
 
-Wallet-side changes are out of scope for the initial PIR witness server. The following integration points define the compatibility contract.
+The wallet-side integration is implemented across `zcash_client_sqlite`, `zcash_client_backend`, `zcash-swift-wallet-sdk`, and `zodl-ios`, following the patterns established by nullifier PIR.
 
-1. **PirWitness → MerklePath conversion**: `PirWitness { position, siblings, anchor_height, anchor_root }` converts to `MerklePath { position, path: siblings.to_vec() }`. The `anchor_height` and `anchor_root` are metadata for wallet storage and verification.
-2. **Anchor root verification**: Computed root must agree with `root_at_checkpoint_id(&H)` from ShardTree and with `GetTreeState`.
-3. **Note position**: `commitment_tree_position` (type `Position`) decomposes as `shard_index = P >> 16`, `subshard_index = (P >> 8) & 0xFF`, `leaf_index = P & 0xFF`. Physical PIR row = `(shard_index - window_start_shard) * 256 + subshard_index`.
-4. **Gate bypass**: Same `skip_unscanned_check` pattern as nullifier PIR.
-5. **Transaction builder injection**: Check `pir_witness_data` table first, fall back to `witness_at_checkpoint_id_caching`. The stored `PirWitness` provides `position`, `siblings`, `anchor_height`, and `anchor_root` — enough to construct `MerklePath<MerkleHashOrchard>` and the anchor.
+### Storage (`zcash_client_sqlite`)
 
-Future wallet work: `pir_witness_data` table, `sync-witness-pir` feature flag, gate bypass, Rust FFI, Swift wrapper, `ScanAction` trigger — following the patterns established by nullifier PIR.
+The `pir_witness_data` table stores PIR-obtained witnesses:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `note_id` | INTEGER PK | FK → `orchard_received_notes(id)`, ON DELETE CASCADE |
+| `siblings` | BLOB (1024) | 32 × 32-byte sibling hashes, leaf-to-root order |
+| `anchor_height` | INTEGER | Block height of the anchor used by the PIR server |
+| `anchor_root` | BLOB (32) | Tree root at `anchor_height` |
+
+The table is created unconditionally (migration always runs); the feature flag gates the code paths that read/write it.
+
+Key queries in `wallet/pir_witness.rs`: `get_notes_needing_pir_witness` (notes with a `commitment_tree_position` but no PIR witness and whose shard is not fully scanned), `insert_pir_witness`, `get_pir_witness`, `get_pir_merkle_path_by_position` (for the transaction builder).
+
+### Feature flag
+
+`sync-witness-pir` — defined in `zcash_client_sqlite/Cargo.toml`, forwarded to `zcash_client_backend`. Enables coin selection bypass, transaction builder fallback, and FFI entry points. The SDK enables it alongside `spendability-pir`:
+
+```toml
+zcash_client_sqlite = { features = ["spendability-pir", "sync-witness-pir"] }
+```
+
+### Coin selection gate bypass
+
+The `shard_scanned_condition` in `wallet/common.rs` governs whether a note's shard must be fully scanned before the note is selected as spendable. With `sync-witness-pir`, Orchard notes that have a row in `pir_witness_data` bypass this gate — the PIR witness provides the authentication path that the incomplete shard cannot.
+
+This is distinct from the `unscanned_tip_exists` bypass (which is tied to `spendability-pir` and skips the blanket rejection of all notes when unscanned ranges exist). The two flags compose: nullifier PIR removes the global gate, witness PIR removes the per-note shard-completeness gate.
+
+### Transaction builder fallback (`zcash_client_backend`)
+
+In `data_api/wallet.rs`, when `witness_at_checkpoint_id_caching` fails for an Orchard input (shard incomplete), the builder falls back to `pir_orchard_witness_fallback`. This reads stored PIR witnesses via `get_pir_orchard_merkle_path` and constructs `MerklePath<MerkleHashOrchard>` from the stored siblings and position. All Orchard inputs in a transaction must share one anchor root — the fallback enforces this.
+
+The `WalletCommitmentTrees` trait in `data_api.rs` has a default `get_pir_orchard_merkle_path` returning `Ok(None)`; the SQLite implementation overrides it when `sync-witness-pir` is enabled.
+
+### PirWitness → MerklePath conversion
+
+`PirWitness { position, siblings, anchor_height, anchor_root }` converts to `MerklePath { position, path: siblings.to_vec() }`. The position decomposes as `shard_index = P >> 16`, `subshard_index = (P >> 8) & 0xFF`, `leaf_index = P & 0xFF`.
+
+### Reorg handling
+
+`truncate_to_height` in `wallet.rs` deletes all `pir_witness_data` rows — the witnesses were obtained at a tree state that may no longer be canonical. The wallet re-queries PIR after the reorg settles. Additionally, `ON DELETE CASCADE` from `orchard_received_notes` ensures witness rows are cleaned up if the note itself is deleted.
+
+### Rust FFI (`zcash-swift-wallet-sdk/rust/`)
+
+Four `extern "C"` functions bridge the witness system to Swift:
+
+| Function | File | Role |
+|----------|------|------|
+| `zcashlc_get_notes_needing_pir_witness` | `lib.rs` | DB → JSON list of `{id, position, value}` |
+| `zcashlc_fetch_pir_witnesses` | `witness.rs` | Network: connects to PIR server, queries per note, returns JSON `WitnessCheckResult` |
+| `zcashlc_insert_pir_witnesses` | `lib.rs` | JSON witnesses → `insert_pir_witness` into DB |
+| `zcashlc_get_pir_witnessed_notes` | `lib.rs` | DB → JSON (diagnostics / UI) |
+
+`zcashlc_fetch_pir_witnesses` uses `WitnessClientBlocking` from `witness-client` — it connects to the server, fetches params and broadcast data once, then calls `get_witness(position)` per note. Results are serialized as JSON with hex-encoded siblings and anchor root.
+
+### Swift wrappers (`zcash-swift-wallet-sdk/Sources/`)
+
+- `WitnessBackend.swift` — wraps `zcashlc_fetch_pir_witnesses` (runs off `@DBActor` since it's network-only).
+- `WitnessTypes.swift` — `PIRNotePosition`, `PIRWitnessEntry`, `PIRWitnessResult`, `PIRWitnessedNote`, `WitnessResult`.
+- `ZcashRustBackend.swift` / `ZcashRustBackendWelding.swift` — DB-backed witness APIs through the rust backend.
+- `SDKSynchronizer.fetchNoteWitnesses(pirServerUrl:progress:)` — orchestrates the full flow: `getNotesNeedingPIRWitness` → `WitnessBackend.fetchWitnesses` → `insertPIRWitnesses` → returns `WitnessResult`.
+
+### iOS app (`zodl-ios/`)
+
+- **Config**: `WalletConfig.pirWitness` feature flag (default off).
+- **URLs**: `SpendabilityPIRConfig.witnessServerUrl` (prod + localhost defaults).
+- **TCA flow**: `RootInitialization` handles `.checkWitnessPIR` / `.checkWitnessPIRResult` actions, calling `sdkSynchronizer.fetchNoteWitnesses`. Triggered from `RootTransactions` after sync completes when the `pirWitness` flag is enabled.
+- **Debug UI**: `PIRDebugView` / `PIRDebugStore` — witness section with refresh, fetch, and display of witnessed notes.
 
 ## Security properties
 
