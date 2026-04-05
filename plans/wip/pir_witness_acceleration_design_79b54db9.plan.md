@@ -19,10 +19,10 @@ todos:
     status: done
   - id: witness-client
     content: "Build witness-client: single YPIRClient, cap + sub-shard root caching, witness reconstruction + self-verification"
-    status: pending
+    status: done
   - id: e2e-mainnet-test
     content: "End-to-end test: ingest from mainnet lightwalletd, PIR-query a real note position, verify auth path against GetTreeState root and cross-validate against ShardTree"
-    status: pending
+    status: done
 isProject: false
 ---
 

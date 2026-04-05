@@ -15,3 +15,12 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 tracing = "0.1"
+
+[dev-dependencies]
+commitment-tree-db = { path = "../commitment-tree-db" }
+commitment-ingest = { path = "../commitment-ingest" }
+chain-ingest = { path = "../../shared/chain-ingest" }
+witness-server = { path = "../witness-server" }
+hex = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.7"

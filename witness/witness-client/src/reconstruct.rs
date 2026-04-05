@@ -18,7 +18,7 @@ use witness_types::*;
 ///
 /// Self-verifies by computing the tree root from the leaf and checking it
 /// against the broadcast anchor root (derived from cap shard roots).
-pub(crate) fn reconstruct_witness(
+pub fn reconstruct_witness(
     position: u64,
     shard_idx: u32,
     subshard_idx: u8,
