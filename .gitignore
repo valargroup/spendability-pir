@@ -3,3 +3,5 @@
 /zodl-ios
 /zcash-swift-wallet-sdk
 /.protoc
+monitor.log
+monitor.sh
