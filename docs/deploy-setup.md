@@ -13,7 +13,7 @@ Two deployment paths:
 
 | Resource | Minimum | Recommended | Notes |
 |----------|---------|-------------|-------|
-| **CPU** | x86-64 (any) | x86-64 or ARM64 | Any modern CPU. No AVX-512 requirement. |
+| **CPU** | x86-64 with AVX-512 | x86-64 with AVX-512 or ARM64 | x86-64 builds require AVX-512F (Intel Skylake-X / AMD Zen 4+). ARM64 builds have no special CPU requirement. |
 | **RAM** | 16 GB | 32 GB | The combined server loads ~56 MB nullifier PIR data and ~64 MB witness PIR data, plus YPIR internal structures for both. Peak usage during initialization is higher. |
 | **Disk** | 10 GB free | 20 GB free | Snapshot data, PIR databases, plus headroom. |
 | **OS** | Linux (x86-64) | Ubuntu 22.04+ / Debian 12+ | macOS (arm64/amd64) binaries are also published but not recommended for production serving. |

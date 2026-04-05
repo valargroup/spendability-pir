@@ -59,6 +59,8 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release -p combined-server --features ypir
+        env:
+          RUSTFLAGS: ${{ contains(matrix.platform, 'amd64') && '-C target-feature=+avx512f' || '' }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
