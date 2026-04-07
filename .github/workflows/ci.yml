@@ -168,8 +168,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: /tmp/pir-test-snapshot
-          key: pir-snapshot-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: pir-snapshot-${{ runner.os }}-
+          key: pir-snapshot-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'witness/witness-server/src/server.rs', 'witness/witness-server/src/state.rs', 'witness/witness-server/tests/pir_round_trip.rs') }}
+          restore-keys: pir-snapshot-v2-${{ runner.os }}-
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
