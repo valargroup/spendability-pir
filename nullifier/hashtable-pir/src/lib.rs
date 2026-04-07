@@ -1,6 +1,8 @@
 mod snapshot;
 
-use spend_types::{hash_to_bucket, NullifierEntry, NullifierWithMeta, BUCKET_CAPACITY, NUM_BUCKETS};
+use spend_types::{
+    hash_to_bucket, NullifierEntry, NullifierWithMeta, BUCKET_CAPACITY, NUM_BUCKETS,
+};
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
@@ -260,7 +262,10 @@ mod tests {
 
         let missing = make_nwms(1000, 100);
         for nwm in &missing {
-            assert!(!db.contains(&nwm.nullifier), "false positive for non-inserted nf");
+            assert!(
+                !db.contains(&nwm.nullifier),
+                "false positive for non-inserted nf"
+            );
         }
     }
 
@@ -275,7 +280,10 @@ mod tests {
         db.rollback_block(&hash).unwrap();
         assert_eq!(db.len(), 0);
         for nwm in &nwms {
-            assert!(!db.contains(&nwm.nullifier), "nf still present after rollback");
+            assert!(
+                !db.contains(&nwm.nullifier),
+                "nf still present after rollback"
+            );
         }
     }
 

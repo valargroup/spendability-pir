@@ -43,11 +43,7 @@ pub fn extract_nullifiers_with_meta(
 ) -> (Vec<NullifierWithMeta>, Option<u32>) {
     let this_tree_size = orchard_tree_size(block);
 
-    let total_actions: u32 = block
-        .vtx
-        .iter()
-        .map(|tx| tx.actions.len() as u32)
-        .sum();
+    let total_actions: u32 = block.vtx.iter().map(|tx| tx.actions.len() as u32).sum();
 
     // Compute tree size at the start of this block:
     // preferred: derive from this block's metadata (end - total_actions)

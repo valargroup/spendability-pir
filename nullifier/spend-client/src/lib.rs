@@ -200,9 +200,7 @@ pub fn scan_bucket_for_nf(decoded_row: &[u8], nf: &[u8; 32]) -> Option<SpendMeta
     bucket_data
         .chunks_exact(ENTRY_BYTES)
         .find(|entry| entry[..32] == nf[..])
-        .map(|entry| {
-            SpendMetadata::from_entry_tail(entry[32..41].try_into().unwrap())
-        })
+        .map(|entry| SpendMetadata::from_entry_tail(entry[32..41].try_into().unwrap()))
 }
 
 #[cfg(test)]

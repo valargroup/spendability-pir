@@ -151,7 +151,8 @@ impl HashTableDb {
             let mut bucket = Bucket::new();
             for j in 0..BUCKET_CAPACITY {
                 let entry_start = offset + j * ENTRY_BYTES;
-                let entry_slice: [u8; ENTRY_BYTES] = payload[entry_start..entry_start + ENTRY_BYTES]
+                let entry_slice: [u8; ENTRY_BYTES] = payload
+                    [entry_start..entry_start + ENTRY_BYTES]
                     .try_into()
                     .unwrap();
                 bucket.entries[j] = NullifierEntry::from_bytes(entry_slice);

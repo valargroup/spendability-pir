@@ -53,8 +53,7 @@ fn bench_ypir_performance() {
                     first_output_position: 0,
                     action_count: 1,
                 };
-                db_bytes[slot_offset..slot_offset + ENTRY_BYTES]
-                    .copy_from_slice(&entry.to_bytes());
+                db_bytes[slot_offset..slot_offset + ENTRY_BYTES].copy_from_slice(&entry.to_bytes());
                 nfs.push(nf);
                 break;
             }
@@ -145,15 +144,20 @@ fn bench_ypir_performance() {
     println!("Query upload:   {} bytes", query_bytes.len());
     println!("Response:       {} bytes", response.len());
 
-    // Feasibility checks
+    // Feasibility check — only meaningful in release mode; debug builds are
+    // orders of magnitude slower and would always fail this.
     let rebuild_s = rebuild_time.as_secs_f64();
-    assert!(
-        rebuild_s < 75.0,
-        "PIR rebuild ({:.1}s) exceeds 75s block interval",
-        rebuild_s,
-    );
-    println!(
-        "\nFeasibility: rebuild {:.1}s < 75s block interval -> OK",
-        rebuild_s,
-    );
+    if cfg!(not(debug_assertions)) {
+        assert!(
+            rebuild_s < 75.0,
+            "PIR rebuild ({:.1}s) exceeds 75s block interval",
+            rebuild_s,
+        );
+    }
+    let verdict = if rebuild_s < 75.0 {
+        "OK"
+    } else {
+        "SKIP (debug)"
+    };
+    println!("\nFeasibility: rebuild {rebuild_s:.1}s vs 75s block interval -> {verdict}");
 }

@@ -511,9 +511,7 @@ async fn test_server_follow_new_block() {
             action_count: 1,
         })
         .collect();
-    hashtable
-        .insert_block(11, hash_for(11), &new_nwms)
-        .unwrap();
+    hashtable.insert_block(11, hash_for(11), &new_nwms).unwrap();
     hashtable.evict_to_target();
 
     // Rebuild PIR and swap (as the follow loop does)

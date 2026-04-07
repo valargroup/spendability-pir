@@ -43,8 +43,7 @@ pub async fn sync(
             let height = block.height;
             let hash = to_hash_array(&block.hash);
             let prev_hash = to_hash_array(&block.prev_hash);
-            let (nullifiers, this_tree_size) =
-                extract_nullifiers_with_meta(block, prev_tree_size);
+            let (nullifiers, this_tree_size) = extract_nullifiers_with_meta(block, prev_tree_size);
 
             tx.send(ChainEvent::NewBlock {
                 height,
@@ -97,8 +96,7 @@ pub async fn follow(
             let height = block.height;
             let hash = to_hash_array(&block.hash);
             let prev_hash = to_hash_array(&block.prev_hash);
-            let (nullifiers, this_tree_size) =
-                extract_nullifiers_with_meta(block, prev_tree_size);
+            let (nullifiers, this_tree_size) = extract_nullifiers_with_meta(block, prev_tree_size);
 
             match tracker.push_block(height, hash, prev_hash) {
                 ChainAction::Extend => {
