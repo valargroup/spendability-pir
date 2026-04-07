@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use witness_types::*;
 
+pub const DEFAULT_WINDOW_SHARD_LIMIT: usize = L0_MAX_SHARDS;
+
 /// Metadata exposed via `/metadata` and attached to PIR state snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessMetadata {
@@ -57,4 +59,11 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub lwd_urls: Vec<String>,
     pub listen_addr: SocketAddr,
+    pub window_shard_limit: usize,
+}
+
+impl ServerConfig {
+    pub fn effective_window_shard_limit(&self) -> usize {
+        self.window_shard_limit.clamp(1, L0_MAX_SHARDS)
+    }
 }

@@ -294,6 +294,7 @@ async fn e2e_witness_roundtrip_server() {
         data_dir: std::path::PathBuf::from("/tmp/witness-e2e-test"),
         lwd_urls: vec![LWD_ENDPOINT.to_string()],
         listen_addr: "127.0.0.1:0".parse().unwrap(),
+        window_shard_limit: witness_server::state::DEFAULT_WINDOW_SHARD_LIMIT,
     };
 
     let app_state = std::sync::Arc::new(AppState::new(config, engine));

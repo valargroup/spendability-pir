@@ -119,7 +119,9 @@ pub fn rebuild_pir<P: PirEngine>(
 async fn prepare_tree(
     client: &mut chain_ingest::LwdClient,
     tip_height: u64,
+    window_shard_limit: usize,
 ) -> Result<(CommitmentTreeDb, u64, Option<u32>)> {
+    let window_shard_limit = window_shard_limit.clamp(1, L0_MAX_SHARDS);
     let subtree_roots = client.get_subtree_roots(ORCHARD_PROTOCOL, 0, 65535).await?;
     let num_completed = subtree_roots.len();
 
@@ -128,9 +130,9 @@ async fn prepare_tree(
         "fetched subtree roots from lightwalletd"
     );
 
-    if num_completed >= L0_MAX_SHARDS {
-        // Window: keep the last (L0_MAX_SHARDS - 1) completed shards + frontier
-        let window_start = num_completed - (L0_MAX_SHARDS - 1);
+    if num_completed >= window_shard_limit {
+        // Window: keep the last (`window_shard_limit` - 1) completed shards + frontier
+        let window_start = num_completed - (window_shard_limit - 1);
         let leaf_offset = (window_start as u64) * (SHARD_LEAVES as u64);
 
         let prefetched: Vec<[u8; 32]> = subtree_roots[..window_start]
@@ -172,6 +174,7 @@ async fn prepare_tree(
 
         tracing::info!(
             window_start_shard = window_start,
+            window_shard_limit,
             prefetched_roots = subtree_roots[..window_start].len(),
             sync_from,
             leaf_offset,
@@ -185,9 +188,10 @@ async fn prepare_tree(
         let floor = min_sync_height(tip_height);
         tracing::info!(
             completed_shards = num_completed,
+            window_shard_limit,
             sync_from = floor,
             "full sync from NU5 (fewer than {} completed shards)",
-            L0_MAX_SHARDS,
+            window_shard_limit,
         );
         Ok((CommitmentTreeDb::new(), floor, None))
     }
@@ -366,7 +370,12 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
             }
             Err(_) => {
                 // No snapshot — use GetSubtreeRoots for smart sync
-                prepare_tree(&mut client, tip_height).await?
+                prepare_tree(
+                    &mut client,
+                    tip_height,
+                    config.effective_window_shard_limit(),
+                )
+                .await?
             }
         };
 
@@ -517,7 +526,14 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
                 };
                 (t, resume, ts)
             }
-            Err(_) => prepare_tree(&mut client, tip_height).await?,
+            Err(_) => {
+                prepare_tree(
+                    &mut client,
+                    tip_height,
+                    config.effective_window_shard_limit(),
+                )
+                .await?
+            }
         };
 
     if forward_start <= tip_height {
@@ -682,5 +698,12 @@ mod tests {
             }
             other => panic!("expected TreeSizeMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn effective_window_shard_limit_is_clamped() {
+        assert_eq!(0usize.clamp(1, L0_MAX_SHARDS), 1);
+        assert_eq!(2usize.clamp(1, L0_MAX_SHARDS), 2);
+        assert_eq!(64usize.clamp(1, L0_MAX_SHARDS), L0_MAX_SHARDS);
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use witness_server::pir_ypir::YpirPirEngine;
 use witness_server::server;
-use witness_server::state::ServerConfig;
+use witness_server::state::{ServerConfig, DEFAULT_WINDOW_SHARD_LIMIT};
 use witness_types::{L0_DB_ROWS, SUBSHARD_ROW_BYTES};
 
 #[derive(Parser)]
@@ -30,6 +30,10 @@ struct Cli {
     /// Blocks between snapshots
     #[arg(long, default_value_t = 100)]
     snapshot_interval: u64,
+
+    /// Number of shards to keep locally during smart sync bootstrap.
+    #[arg(long, default_value_t = DEFAULT_WINDOW_SHARD_LIMIT)]
+    window_shard_limit: usize,
 }
 
 #[tokio::main]
@@ -49,12 +53,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir: cli.data_dir,
         lwd_urls: cli.lwd_url,
         listen_addr: cli.listen,
+        window_shard_limit: cli.window_shard_limit,
     };
 
     tracing::info!(
         listen = %config.listen_addr,
         lwd_endpoints = ?config.lwd_urls,
         data_dir = %config.data_dir.display(),
+        window_shard_limit = config.effective_window_shard_limit(),
         "starting witness-server",
     );
 

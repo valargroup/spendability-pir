@@ -164,6 +164,7 @@ pub async fn run<
             data_dir: wit_data_dir,
             lwd_urls: config.lwd_urls.clone(),
             listen_addr: config.listen_addr,
+            window_shard_limit: witness_server::state::DEFAULT_WINDOW_SHARD_LIMIT,
         }
     };
 
