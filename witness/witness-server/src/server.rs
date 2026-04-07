@@ -23,6 +23,17 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("chain client error: {0}")]
     Client(Box<chain_ingest::ClientError>),
+    #[error("lightwalletd returned no block at height {height} while bootstrapping windowed sync")]
+    MissingCompletingBlock { height: u64 },
+    #[error(
+        "{context} tree size mismatch before appending block {height}: expected {expected}, got {actual}"
+    )]
+    TreeSizeMismatch {
+        context: &'static str,
+        height: u64,
+        expected: u64,
+        actual: u64,
+    },
 }
 
 impl From<chain_ingest::ClientError> for ServerError {
@@ -132,19 +143,43 @@ async fn prepare_tree(
             })
             .collect();
 
-        let sync_from = subtree_roots[window_start - 1].completing_block_height + 1;
-        let initial_tree_size = Some(leaf_offset as u32);
+        let completing_block_height = subtree_roots[window_start - 1].completing_block_height;
+        let sync_from = completing_block_height + 1;
+
+        // Seed the window with all fully completed shard roots first.
+        let mut tree = CommitmentTreeDb::with_offset(leaf_offset, prefetched);
+        let completing_blocks = client
+            .get_block_range(completing_block_height, completing_block_height)
+            .await?;
+
+        // The shard-completing block can also contain the first leaves of the
+        // window we are about to sync. If we skip those leaves, every later
+        // position in the window is shifted.
+        let block = completing_blocks
+            .first()
+            .ok_or(ServerError::MissingCompletingBlock {
+                height: completing_block_height,
+            })?;
+        let spillover = completing_block_spillover(block, leaf_offset);
+        if !spillover.is_empty() {
+            let mut hash = [0u8; 32];
+            let len = block.hash.len().min(32);
+            hash[..len].copy_from_slice(&block.hash[..len]);
+            tree.append_commitments(completing_block_height, hash, &spillover);
+        }
+
+        let initial_tree_size = Some(tree.tree_size() as u32);
 
         tracing::info!(
             window_start_shard = window_start,
-            prefetched_roots = prefetched.len(),
+            prefetched_roots = subtree_roots[..window_start].len(),
             sync_from,
             leaf_offset,
+            initial_tree_size,
             "using windowed sync (skipping {} shards)",
             window_start,
         );
 
-        let tree = CommitmentTreeDb::with_offset(leaf_offset, prefetched);
         Ok((tree, sync_from, initial_tree_size))
     } else {
         let floor = min_sync_height(tip_height);
@@ -156,6 +191,71 @@ async fn prepare_tree(
         );
         Ok((CommitmentTreeDb::new(), floor, None))
     }
+}
+
+fn completing_block_spillover(
+    block: &chain_ingest::proto::CompactBlock,
+    leaf_offset: u64,
+) -> Vec<[u8; 32]> {
+    // `orchard_commitment_tree_size` is the cumulative size after this block,
+    // so it tells us how many of this block's commitments landed inside the
+    // current window beyond `leaf_offset`.
+    let all = commitment_ingest::parser::extract_commitments(block);
+    let end_tree_size = block
+        .chain_metadata
+        .as_ref()
+        .map_or(0u64, |m| m.orchard_commitment_tree_size as u64);
+    spillover_from_commitments(&all, end_tree_size, leaf_offset)
+}
+
+fn spillover_from_commitments(
+    commitments: &[[u8; 32]],
+    end_tree_size: u64,
+    leaf_offset: u64,
+) -> Vec<[u8; 32]> {
+    if end_tree_size <= leaf_offset {
+        return vec![];
+    }
+
+    // Keep only the suffix whose absolute positions are inside the window.
+    let spillover_count = (end_tree_size - leaf_offset) as usize;
+    let skip = commitments.len().saturating_sub(spillover_count);
+    commitments[skip..].to_vec()
+}
+
+fn validate_prior_tree_size(
+    tree: &CommitmentTreeDb,
+    height: u64,
+    prior_tree_size: Option<u32>,
+    context: &'static str,
+) -> Result<()> {
+    let Some(expected) = prior_tree_size else {
+        return Ok(());
+    };
+
+    let actual = tree.tree_size();
+    let expected = u64::from(expected);
+    if actual == expected {
+        return Ok(());
+    }
+
+    tracing::error!(
+        context,
+        height,
+        expected_tree_size = expected,
+        actual_tree_size = actual,
+        leaf_offset = tree.leaf_offset(),
+        latest_height = tree.latest_height(),
+        latest_hash = ?tree.latest_block_hash(),
+        "tree size mismatch before appending commitments"
+    );
+
+    Err(ServerError::TreeSizeMismatch {
+        context,
+        height,
+        expected,
+        actual,
+    })
 }
 
 /// Lowest block height we'll ever sync.
@@ -196,9 +296,11 @@ pub async fn sync_range(
             height,
             hash,
             commitments,
+            prior_tree_size,
             ..
         } = event
         {
+            validate_prior_tree_size(tree, height, prior_tree_size, "initial sync")?;
             tree.append_commitments(height, hash, &commitments);
 
             if height % 1000 == 0 {
@@ -353,8 +455,10 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
                 height,
                 hash,
                 commitments,
+                prior_tree_size,
                 ..
             } => {
+                validate_prior_tree_size(&tree, height, prior_tree_size, "follow mode")?;
                 tree.append_commitments(height, hash, &commitments);
                 blocks_since_snapshot += 1;
                 tracing::info!(
@@ -440,4 +544,143 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
     app_state.phase.store(Arc::new(ServerPhase::Serving));
 
     Ok((app_state, tree))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chain_ingest::proto::{ChainMetadata, CompactBlock, CompactOrchardAction, CompactTx};
+    use witness_types::SHARD_LEAVES;
+
+    fn make_leaf(tag: u64) -> [u8; 32] {
+        let mut hash = [0u8; 32];
+        hash[..8].copy_from_slice(&tag.to_le_bytes());
+        hash
+    }
+
+    fn make_action(tag: u64) -> CompactOrchardAction {
+        CompactOrchardAction {
+            nullifier: vec![0; 32],
+            cmx: make_leaf(tag).to_vec(),
+            ephemeral_key: vec![0; 32],
+            ciphertext: vec![0; 52],
+        }
+    }
+
+    fn make_block(height: u64, tags: &[u64], tree_size: u64) -> CompactBlock {
+        CompactBlock {
+            height,
+            hash: vec![height as u8; 32],
+            prev_hash: vec![height.saturating_sub(1) as u8; 32],
+            vtx: vec![CompactTx {
+                actions: tags.iter().copied().map(make_action).collect(),
+                ..Default::default()
+            }],
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: tree_size as u32,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn spillover_slice_keeps_only_commitments_past_offset() {
+        let commitments = vec![make_leaf(1), make_leaf(2), make_leaf(3), make_leaf(4)];
+
+        let spillover = spillover_from_commitments(&commitments, 6, 4);
+
+        assert_eq!(spillover, vec![make_leaf(3), make_leaf(4)]);
+    }
+
+    #[test]
+    fn completing_block_spillover_matches_window_bootstrap_reference_tree() {
+        let spillover_count = 3usize;
+        let next_block_count = 2usize;
+        let first_block_tags: Vec<u64> = (0..(SHARD_LEAVES + spillover_count))
+            .map(|i| i as u64 + 1)
+            .collect();
+        let second_block_tags: Vec<u64> = (0..next_block_count)
+            .map(|i| SHARD_LEAVES as u64 + spillover_count as u64 + i as u64 + 1)
+            .collect();
+
+        let completing_block = make_block(
+            100,
+            &first_block_tags,
+            SHARD_LEAVES as u64 + spillover_count as u64,
+        );
+        let next_block = make_block(
+            101,
+            &second_block_tags,
+            SHARD_LEAVES as u64 + spillover_count as u64 + next_block_count as u64,
+        );
+
+        let spillover = completing_block_spillover(&completing_block, SHARD_LEAVES as u64);
+        let expected_spillover: Vec<_> = first_block_tags
+            .iter()
+            .skip(SHARD_LEAVES)
+            .copied()
+            .map(make_leaf)
+            .collect();
+        assert_eq!(spillover, expected_spillover);
+
+        let completed_shard: Vec<_> = first_block_tags
+            .iter()
+            .take(SHARD_LEAVES)
+            .copied()
+            .map(make_leaf)
+            .collect();
+        let second_block_commitments = commitment_ingest::parser::extract_commitments(&next_block);
+
+        let mut prefetched_tree = CommitmentTreeDb::new();
+        prefetched_tree.append_commitments(99, [0xAA; 32], &completed_shard);
+        let prefetched_root = prefetched_tree.shard_roots()[0].1;
+
+        let mut reference_tree = CommitmentTreeDb::new();
+        reference_tree.append_commitments(
+            completing_block.height,
+            [0x11; 32],
+            &commitment_ingest::parser::extract_commitments(&completing_block),
+        );
+        reference_tree.append_commitments(next_block.height, [0x22; 32], &second_block_commitments);
+
+        let mut windowed_tree =
+            CommitmentTreeDb::with_offset(SHARD_LEAVES as u64, vec![prefetched_root]);
+        windowed_tree.append_commitments(completing_block.height, [0x11; 32], &spillover);
+        windowed_tree.append_commitments(next_block.height, [0x22; 32], &second_block_commitments);
+
+        assert_eq!(
+            windowed_tree.leaves(),
+            &reference_tree.leaves()[SHARD_LEAVES..],
+            "window bootstrap should preserve leaf ordering across the shard boundary"
+        );
+        assert_eq!(
+            windowed_tree.tree_root(),
+            reference_tree.tree_root(),
+            "window bootstrap should match the full reference tree root"
+        );
+    }
+
+    #[test]
+    fn validate_prior_tree_size_rejects_drift() {
+        let mut tree = CommitmentTreeDb::new();
+        tree.append_commitments(100, [1u8; 32], &[make_leaf(1), make_leaf(2)]);
+
+        let err = validate_prior_tree_size(&tree, 101, Some(1), "test").unwrap_err();
+
+        match err {
+            ServerError::TreeSizeMismatch {
+                context,
+                height,
+                expected,
+                actual,
+            } => {
+                assert_eq!(context, "test");
+                assert_eq!(height, 101);
+                assert_eq!(expected, 1);
+                assert_eq!(actual, 2);
+            }
+            other => panic!("expected TreeSizeMismatch, got {other:?}"),
+        }
+    }
 }
