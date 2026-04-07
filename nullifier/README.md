@@ -81,7 +81,7 @@ The nullifier table has 16,384 rows × 4,592 bytes per row = ~72 MB. SimplePIR i
 | `TARGET_SIZE` | 1,000,000 | Max nullifiers before oldest-block eviction |
 | `CONFIRMATION_DEPTH` | 10 | Blocks before finalization |
 
-**Entry format**: Each 41-byte entry contains the 32-byte nullifier followed by 9 bytes of spend metadata: `spend_height` (u32 LE), `first_output_position` (u32 LE), and `action_count` (u8). The metadata enables a future Decryption PIR step to immediately locate and trial-decrypt change notes from a spending transaction without waiting for block scanning.
+**Entry format**: Each 41-byte entry contains the 32-byte nullifier followed by 9 bytes of spend metadata: `spend_height` (u32 LE), `first_output_position` (u32 LE), and `action_count` (u8). The metadata enables the wallet to immediately locate and trial-decrypt change notes from the spending transaction without waiting for block scanning (see [Change Note Discovery](#change-note-discovery) below). A future v2 path will replace the RPC block download with Decryption PIR queries.
 
 **Bucket capacity**: At 1M nullifiers across 16,384 buckets, the average occupancy is ~61 entries per bucket. The capacity of 112 provides ~1.8× headroom. Since nullifiers are cryptographically random, bucket sizes follow a tight binomial distribution — the probability of any bucket exceeding 112 at 1M entries is negligible. If a bucket overflow occurs (bug or extreme volume), the server returns an error for that block and the block's nullifiers are not inserted.
 
@@ -212,6 +212,21 @@ Three gates normally force `spendableValue` to zero during sync. When `spendabil
 ### FFI entry point
 
 `zcashlc_check_nullifiers_pir` (C FFI in `spendability.rs`): accepts nullifier bytes and a PIR server URL, connects to the PIR server, checks each nullifier, and returns a JSON `NullifierCheckResult` containing `spent: [Option<SpendMetadata>]` parallel to the input — `null` for unspent, `{ spend_height, first_output_position, action_count }` for spent. The caller (`SDKSynchronizer`) maps spent results to note IDs and writes them into `pir_spent_notes`.
+
+### Change note discovery
+
+After nullifier PIR identifies a spent note, the wallet discovers change outputs from the same spending transaction — without waiting for the scanner to reach that block.
+
+For each spent note, the `SpendMetadata` returned by PIR provides the exact location of the transaction's Orchard actions in the commitment tree (`first_output_position`, `action_count`) and the block height (`spend_height`). The wallet:
+
+1. Downloads the single compact block at `spend_height` via lightwalletd RPC
+2. Extracts the `action_count` compact actions starting at `first_output_position`
+3. Trial-decrypts each action using the account's Orchard FVK (both internal and external scopes)
+4. Stores any discovered notes in `pir_provisional_notes` with their full note fields (diversifier, rseed, rho, nullifier, cmx) — enough to reconstruct the note for spending once a witness is obtained
+
+Provisional notes contribute to the wallet balance in `get_wallet_summary`: witnessed notes (`has_pir_witness = 1`) add to `spendable_value`, unwitnessed notes add to `value_pending_spendability`. When the canonical scanner later processes the same block and inserts the note into `orchard_received_notes`, the provisional row is deleted automatically (reconciliation by matching `commitment_tree_position`).
+
+This is the v1 data source path. A future v2 will replace the RPC block download with Decryption PIR queries, removing the need to fetch the full compact block.
 
 ### Transaction list placeholders
 

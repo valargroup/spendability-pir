@@ -31,6 +31,7 @@ The system spans four repositories and three runtime environments:
 │  spend-client ◄────────────────┘  witness-client ◄─────────┘           │
 │       │                                │                                │
 │  spendability.rs (FFI)            witness.rs (FFI)                      │
+│  change_discovery.rs (trial decrypt)   │                                │
 │       │                                │                                │
 │  zcash_client_sqlite                   │                                │
 │       │                                │                                │
@@ -39,6 +40,9 @@ The system spans four repositories and three runtime environments:
 │       │  └──────────────────────────────────────┘                       │
 │       │  ┌──────────────────────────────────────┐                       │
 │       ├──┤  spent_notes_clause (UNION)           │                      │
+│       │  └──────────────────────────────────────┘                       │
+│       │  ┌──────────────────────────────────────┐                       │
+│       ├──┤  pir_provisional_notes table          │                      │
 │       │  └──────────────────────────────────────┘                       │
 │       │  ┌──────────────────────────────────────┐                       │
 │       ├──┤  pir_witness_data table               │                      │
@@ -75,8 +79,8 @@ The system spans four repositories and three runtime environments:
 | Repository | Role | Nullifier PIR code | Witness PIR code |
 |---|---|---|---|
 | `spendability-pir` | PIR servers + client libraries | `nullifier/spend-client/`, `nullifier/spend-types/` | `witness/witness-client/`, `witness/witness-types/` |
-| `zcash-swift-wallet-sdk` | Rust FFI + Swift SDK | `rust/src/spendability.rs`, `SpendabilityBackend.swift`, `SpendabilityTypes.swift` | `rust/src/witness.rs`, `WitnessBackend.swift`, `WitnessTypes.swift` |
-| `zcash_client_sqlite` | Wallet database crate | `src/wallet/common.rs` (`spent_notes_clause`, `unscanned_tip_exists` bypass), `src/wallet.rs` (`is_any_spendable` bypass, `truncate_to_height`) | `src/wallet/pir_witness.rs`, `src/wallet/common.rs` (`shard_scanned_condition` bypass) |
+| `zcash-swift-wallet-sdk` | Rust FFI + Swift SDK | `rust/src/spendability.rs`, `rust/src/change_discovery.rs`, `SpendabilityBackend.swift`, `SpendabilityTypes.swift` | `rust/src/witness.rs`, `WitnessBackend.swift`, `WitnessTypes.swift` |
+| `zcash_client_sqlite` | Wallet database crate | `src/wallet/common.rs` (`spent_notes_clause`, `unscanned_tip_exists` bypass), `src/wallet.rs` (`is_any_spendable` bypass, `truncate_to_height`), `src/wallet/pir_provisional.rs` (change note storage) | `src/wallet/pir_witness.rs`, `src/wallet/common.rs` (`shard_scanned_condition` bypass) |
 | `zcash_client_backend` | Wallet logic crate | — | `src/data_api.rs` (`get_pir_orchard_merkle_path` trait method), `src/data_api/wallet.rs` (`pir_orchard_witness_fallback`) |
 | `zodl-ios` | iOS app (TCA) | `RootInitialization.swift` (`.checkSpendabilityPIR`), `RootTransactions.swift` (placeholders), `PIRDebugStore.swift` | `RootInitialization.swift` (`.checkWitnessPIR`), `PIRDebugStore.swift` (witness section) |
 
@@ -104,13 +108,17 @@ The nullifier PIR flow is split across multiple FFI functions to keep network I/
 - `zcashlc_insert_pir_spent_notes` — writes spent results into `pir_spent_notes` (atomic conditional insert)
 - `zcashlc_get_pir_pending_spends` — reads PIR-detected spends not yet confirmed by scanning (for transaction list placeholders)
 
+**Change note discovery** (in `lib.rs`, accessed through `@DBActor`):
+- `zcashlc_discover_change_notes` — given a `spent_note_id` and the serialized `CompactBlock` at `spend_height`, trial-decrypts the actions in the `[first_output_position, first_output_position + action_count)` range using the account's Orchard FVK (both internal and external scopes). Inserts discovered notes into `pir_provisional_notes` and returns JSON `[{"position": u64, "value": u64, "provisional_note_id": i64}]`
+- `zcashlc_mark_provisional_note_witnessed` — sets `has_pir_witness = 1` on a provisional note after a PIR witness is obtained
+
 #### Swift Orchestration
 
 `SDKSynchronizer.checkWalletSpendability(pirServerUrl, progress)`:
 1. Read unspent notes via `getUnspentOrchardNotesForPIR()`
 2. Call `SpendabilityBackend().checkNullifiersPIR()` (network, runs on detached task)
 3. Write back spent results via `insertPIRSpentNotes()`
-4. Set `sdkFlags.pirCompleted = true`
+4. Discover change notes: for each spent note, download the compact block at `metadata.spendHeight` via `lightWalletService.blockRange`, then call `discoverChangeNotes` to trial-decrypt and store provisional notes. Failures are per-note — a failed discovery does not block the overall flow.
 5. Return `SpendabilityResult` (spent note IDs, total value, height range)
 
 #### App Trigger
@@ -286,7 +294,53 @@ Cleared by:
   • Account deletion                    ──> FK ON DELETE CASCADE
 ```
 
-Both tables are created unconditionally by their migrations (schema is identical across all builds). When the corresponding feature is off, the tables are empty and unused.
+### `pir_provisional_notes` Table (Change Note Discovery)
+
+```sql
+CREATE TABLE pir_provisional_notes (
+    id INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    spent_note_id INTEGER NOT NULL,
+    value INTEGER NOT NULL,
+    position INTEGER NOT NULL UNIQUE,
+    diversifier BLOB NOT NULL,
+    rseed BLOB NOT NULL,
+    rho BLOB NOT NULL,
+    nullifier BLOB NOT NULL UNIQUE,
+    cmx BLOB NOT NULL,
+    spend_height INTEGER NOT NULL,
+    has_pir_witness INTEGER NOT NULL DEFAULT 0
+)
+```
+
+- `account_id`: references `accounts(id)` — the account that owns the discovered change note
+- `spent_note_id`: the `orchard_received_notes.id` of the note whose spend revealed this change output
+- `position`: the note's global Orchard commitment tree position, used as a deduplication key
+- `diversifier`, `rseed`, `rho`, `nullifier`, `cmx`: Orchard note fields extracted via trial decryption — sufficient to reconstruct the note for spending once a witness is obtained
+- `has_pir_witness`: `0` = discovered but not yet witnessed; `1` = PIR witness obtained, eligible for spendable balance
+
+**Integration point — `get_wallet_summary` balance:** When `spendability-pir` is enabled, provisional notes contribute to the Orchard balance in `get_wallet_summary`. Witnessed notes (`has_pir_witness = 1`) add to `spendable_value`; unwitnessed notes add to `value_pending_spendability`.
+
+**Integration point — scanner reconciliation:** When the canonical scanner inserts an Orchard note via `put_received_note` with a matching `commitment_tree_position`, the corresponding provisional row is deleted. This prevents double-counting — canonical data supersedes the provisional hint.
+
+**Lifecycle:**
+
+```
+Spent note detected ──> Download block ──> Trial-decrypt ──> INSERT into
+  (nullifier PIR)         (RPC)             (change_discovery)  pir_provisional_notes
+                                                                    │
+                                                 ┌──────────────────┤
+                                                 ▼                  ▼
+                                          PIR witness          Scanner inserts
+                                          obtained ──>         canonical note ──>
+                                          has_pir_witness=1    DELETE provisional row
+
+Cleared by:
+  • truncate_to_height (reorg/rescan)  ──> DELETE FROM pir_provisional_notes
+  • Scanner reconciliation              ──> DELETE by matching position
+```
+
+All three tables are created unconditionally by their migrations (schema is identical across all builds). When the corresponding feature is off, the tables are empty and unused.
 
 ## Spendability Gates
 
@@ -340,9 +394,11 @@ getWalletSummary (Swift)      chainTipUpdated gates    Orchard: preserved if
 
 - `spent_notes_clause` excludes PIR-marked spent notes from all balance and selection queries.
 - Notes NOT in `pir_spent_notes` have been confirmed unspent by PIR's on-chain nullifier check.
+- Provisional change notes are inserted with `INSERT OR IGNORE` keyed on `position`, making discovery idempotent across retries.
+- Provisional notes are automatically deleted when the canonical scanner inserts the same note (by matching `commitment_tree_position`), preventing double-counting.
 - Notes with PIR witnesses can construct valid spend proofs using the server-provided authentication path, which is self-verified against the anchor root.
 - Invalid PIR witnesses are rejected before persistence, and stale snapshots do not overwrite newer witness rows.
-- If PIR servers are unreachable, `pir_spent_notes` and `pir_witness_data` are empty. The wallet falls back to standard scanning behavior — spendability is delayed but never blocked. No funds are lost.
+- If PIR servers are unreachable, `pir_spent_notes`, `pir_provisional_notes`, and `pir_witness_data` are empty. The wallet falls back to standard scanning behavior — spendability is delayed but never blocked. No funds are lost.
 - Newly discovered notes trigger a debounced PIR re-check within 5 seconds via `foundTransactions` / `syncReachedUpToDate`.
 
 ## Feature Flag Strategy
@@ -358,7 +414,11 @@ Two Cargo features in `zcash_client_sqlite` control PIR integration:
 | `spent_notes_clause` | Original query (no UNION) | UNION with `pir_spent_notes` |
 | `is_any_spendable` (Orchard) | Checked normally | Bypassed (always true) |
 | `unscanned_tip_exists` (Orchard) | Checked normally | Bypassed (skipped) |
-| `truncate_to_height` | DELETE is a no-op (empty table) | Clears PIR rows |
+| `pir_provisional_notes` table | Exists (migration unconditional) | Exists |
+| `pir_provisional` module | Not compiled | Compiled |
+| `get_wallet_summary` (Orchard) | No provisional note contribution | Provisional notes added to spendable/pending balance |
+| Scanner reconciliation | No provisional cleanup | Deletes provisional row when canonical note inserted |
+| `truncate_to_height` | DELETE is a no-op (empty tables) | Clears `pir_spent_notes` and `pir_provisional_notes` |
 
 ### `sync-witness-pir`
 
@@ -379,7 +439,7 @@ Three writers access the wallet SQLite DB:
 | Writer | Connection | Writes to |
 |---|---|---|
 | SDK sync loop | Managed by `@DBActor` | `orchard_received_notes`, `orchard_received_note_spends`, `transactions`, etc. |
-| Nullifier PIR DB helpers | Through `@DBActor` | `pir_spent_notes` only |
+| Nullifier PIR DB helpers | Through `@DBActor` | `pir_spent_notes`, `pir_provisional_notes` |
 | Witness PIR DB helpers | Through `@DBActor` | `pir_witness_data` only |
 
 The PIR network calls (`zcashlc_check_nullifiers_pir`, `zcashlc_fetch_pir_witnesses`) open no database connections — they are pure network I/O. DB reads and writes go through the `@DBActor`-managed connection via the `zcashlc_*` helpers in `lib.rs`.
@@ -404,7 +464,9 @@ The two PIR subsystems handle failures differently:
 
 At insert time, each returned witness is validated against the wallet's stored Orchard note before it is persisted. At send time, if transaction construction fails because the selected Orchard PIR witnesses disagree on anchor/root, the SDK attempts one targeted refresh-and-retry using the last recorded witness PIR server URL. If no URL is recorded, no selected Orchard notes are eligible, or the refresh yields no witnesses, the original transaction-construction error is returned unchanged.
 
-In both cases, server unavailability is non-fatal. The wallet falls back to standard scanning — spendability is delayed but never blocked.
+**Change note discovery** uses per-note semantics within the `checkWalletSpendability` flow. For each spent note, the wallet downloads the compact block at `spend_height` and trial-decrypts locally. If the block download or decryption fails for one note, the error is logged and that note is skipped — other spent notes can still have their change discovered. Discovery failures do not affect the nullifier PIR results already written to `pir_spent_notes`.
+
+In all cases, server unavailability is non-fatal. The wallet falls back to standard scanning — spendability is delayed but never blocked.
 
 ## Cross-Crate Dependency Graph
 
@@ -416,6 +478,7 @@ spendability-pir/witness-client ─┘           │
                                                ▼
                                         zcash_client_sqlite
                                           ├── pir_spent_notes + spent_notes_clause
+                                          ├── pir_provisional_notes + balance integration
                                           └── pir_witness_data + shard_scanned_condition
                                                │
                                                │ path dependency
