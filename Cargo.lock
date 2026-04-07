@@ -542,6 +542,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "decryption-server"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "decryption-db",
+ "decryption-types",
+ "pir-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "spiral-rs",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "ypir",
+]
+
+[[package]]
 name = "decryption-types"
 version = "0.1.0"
 dependencies = [

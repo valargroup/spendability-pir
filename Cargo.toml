@@ -14,6 +14,7 @@ members = [
     "witness/witness-server",
     "witness/decryption-types",
     "witness/decryption-db",
+    "witness/decryption-server",
     "witness/witness-client",
     "combined-server",
 ]

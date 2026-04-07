@@ -13,7 +13,7 @@ todos:
     status: done
   - id: phase-2a
     content: "Create decryption-server crate: Axum routes, PirEngine, rebuild_pir, PIR round-trip test"
-    status: pending
+    status: done
   - id: phase-2b
     content: "Integrate decryption into combined-server: feature flag, follow loop, routes, health, snapshots"
     status: pending
