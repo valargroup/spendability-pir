@@ -15,8 +15,8 @@ Traditional scanning resolves this eventually but can take 30 seconds to several
 
 ### Spendability lifecycle
 
-1. **Wallet behind** (PIR active): The wallet has unspent Orchard notes in its database. It queries the PIR server for each note's nullifier. If the server's hash table contains the nullifier, the note has been spent on-chain. The wallet marks it in `pir_spent_notes` and excludes it from balance calculations.
-2. **Wallet catches up**: Scanning confirms spends by inserting into `orchard_received_note_spends`. The `pir_spent_notes` entry becomes redundant — `spent_notes_clause` UNIONs both tables, so deduplication is automatic.
+1. **Wallet behind** (PIR active): The wallet has unspent Orchard notes in its database. It queries the PIR server for each note's nullifier. If the server's hash table contains the nullifier, the note has been spent on-chain. The wallet upserts a row in `pir_notes` with `is_spent = 1` and excludes it from balance calculations.
+2. **Wallet catches up**: Scanning confirms spends by inserting into `orchard_received_note_spends`. The `pir_notes` entry becomes redundant — `spent_notes_clause` UNIONs both sources, so deduplication is automatic.
 3. **Steady state** (PIR unnecessary): The wallet is synced. New spends are detected by scanning within seconds. PIR is not queried.
 
 PIR is a **sync-time accelerator**, not a replacement for scanning. The server needs to maintain nullifier data for a window covering recent chain history (currently ~1M nullifiers ≈ 290 days), not the full chain.
@@ -199,7 +199,7 @@ Wallet-side PIR integration spans three repositories (`zcash_client_sqlite`, `zc
 
 ### Database integration
 
-`pir_spent_notes` table stores note IDs whose nullifiers PIR confirmed as spent on-chain. `spent_notes_clause` UNIONs this table with `orchard_received_note_spends`, so all balance and note-selection queries automatically exclude PIR-detected spends.
+`pir_notes` stores the PIR lifecycle for each note. When a nullifier is confirmed as spent on-chain, the row's `is_spent` flag is set to 1. `spent_notes_clause` UNIONs `canonical_note_id` from spent `pir_notes` rows with `orchard_received_note_spends`, so all balance and note-selection queries automatically exclude PIR-detected spends.
 
 ### Spendability gate bypass
 
@@ -211,7 +211,7 @@ Three gates normally force `spendableValue` to zero during sync. When `spendabil
 
 ### FFI entry point
 
-`zcashlc_check_nullifiers_pir` (C FFI in `spendability.rs`): accepts nullifier bytes and a PIR server URL, connects to the PIR server, checks each nullifier, and returns a JSON `NullifierCheckResult` containing `spent: [Option<SpendMetadata>]` parallel to the input — `null` for unspent, `{ spend_height, first_output_position, action_count }` for spent. The caller (`SDKSynchronizer`) maps spent results to note IDs and writes them into `pir_spent_notes`.
+`zcashlc_check_nullifiers_pir` (C FFI in `spendability.rs`): accepts nullifier bytes and a PIR server URL, connects to the PIR server, checks each nullifier, and returns a JSON `NullifierCheckResult` containing `spent: [Option<SpendMetadata>]` parallel to the input — `null` for unspent, `{ spend_height, first_output_position, action_count }` for spent. The caller (`SDKSynchronizer`) maps spent results to note IDs and upserts them into `pir_notes` with `is_spent = 1`.
 
 ### Change note discovery
 
@@ -224,7 +224,7 @@ For each spent note, the `SpendMetadata` returned by PIR provides the exact loca
 1. Downloads the single compact block at `spend_height` via lightwalletd RPC
 2. Extracts the `action_count` compact actions starting at `first_output_position`
 3. Trial-decrypts each action using the account's Orchard FVK (both internal and external scopes)
-4. Stores discovered notes in `pir_provisional_notes` at depth 1, with their full note fields (diversifier, rseed, rho, nullifier, cmx) — enough to reconstruct the note for spending once a witness is obtained
+4. Stores discovered notes in `pir_notes` (with `canonical_note_id = NULL`) at depth 1, with their full note fields (diversifier, rseed, rho, nullifier, cmx) — enough to reconstruct the note for spending once a witness is obtained
 
 **Phase 2 — Recursive chain:** The wallet then iteratively processes provisional notes:
 
@@ -233,9 +233,9 @@ For each spent note, the `SpendMetadata` returned by PIR provides the exact loca
 3. For each spent provisional, repeats the block download and trial decryption at `depth + 1`
 4. Continues until no unchecked provisionals remain or a safety cap (`maxDepth`, default 20) is reached
 
-Only active leaf nodes — provisional notes where `is_spent = 0` and `discovered_by_scanner = 0` — contribute to the wallet balance in `get_wallet_summary`. Witnessed leaves (`has_pir_witness = 1`) add to `spendable_value`; unwitnessed leaves add to `value_pending_spendability`.
+Only active leaf nodes — provisional notes where `is_spent = 0` and `discovered_by_scanner = 0` — contribute to the wallet balance in `get_wallet_summary`. Witnessed leaves (`witness_siblings IS NOT NULL`) add to `spendable_value`; unwitnessed leaves add to `value_pending_spendability`.
 
-When the canonical scanner later processes a block and inserts a note into `orchard_received_notes` at the same commitment tree position, the provisional row is marked `discovered_by_scanner = 1` rather than deleted. This preserves the recursive chain — descendants of the reconciled note remain valid. If the reconciled provisional was PIR-marked as spent, that status is propagated to `pir_spent_notes` for the canonical note.
+When the canonical scanner later processes a block and inserts a note into `orchard_received_notes` at the same commitment tree position, the provisional row is reconciled by setting `canonical_note_id` and `discovered_by_scanner = 1` rather than deleted. This preserves the recursive chain — descendants of the reconciled note remain valid. The `is_spent` flag on the same row is picked up by `spent_notes_clause` via `canonical_note_id`, so spend status propagates automatically.
 
 This is the v1 data source path. A future v2 will replace the RPC block download with Decryption PIR queries, removing the need to fetch the full compact block.
 
