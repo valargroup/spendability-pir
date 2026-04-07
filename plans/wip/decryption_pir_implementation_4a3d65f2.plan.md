@@ -4,7 +4,7 @@ overview: "Implement decryption PIR end-to-end: server ingest, PIR database, ser
 todos:
   - id: phase-1a
     content: "Create decryption-types crate: DecryptionLeaf struct, size constants, serde, tests"
-    status: pending
+    status: done
   - id: phase-1b
     content: "Extend commitment-ingest parser: extract_decryption_leaves + combined extractor, tests"
     status: pending
