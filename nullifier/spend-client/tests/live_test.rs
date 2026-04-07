@@ -29,13 +29,13 @@ async fn test_live_random_nullifier_not_spent() {
 
     let random_nf = [0xAB; 32];
     let start = Instant::now();
-    let is_spent = client.is_spent(&random_nf).await.unwrap();
+    let meta = client.is_spent(&random_nf).await.unwrap();
     println!(
         "\nRandom nullifier: is_spent={} (round-trip {:?})",
-        is_spent,
+        meta.is_some(),
         start.elapsed()
     );
-    assert!(!is_spent, "random nullifier should not be spent");
+    assert!(meta.is_none(), "random nullifier should not be spent");
 }
 
 #[tokio::test]
@@ -94,15 +94,16 @@ async fn test_live_real_nullifier_is_spent() {
 
     // Query the real nullifier
     let start = Instant::now();
-    let is_spent = client.is_spent(&real_nf).await.unwrap();
+    let meta = client.is_spent(&real_nf).await.unwrap();
     let elapsed = start.elapsed();
     println!(
-        "Real nullifier (height {}): is_spent={} (round-trip {:?})",
-        found_height, is_spent, elapsed
+        "Real nullifier (height {}): meta={:?} (round-trip {:?})",
+        found_height, meta, elapsed
     );
-    assert!(
-        is_spent,
-        "real nullifier from height {found_height} should be found as spent"
+    let meta = meta.expect("real nullifier from recent block should be found as spent");
+    println!(
+        "  spend_height={}, first_output_position={}, action_count={}",
+        meta.spend_height, meta.first_output_position, meta.action_count,
     );
 }
 

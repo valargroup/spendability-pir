@@ -418,8 +418,8 @@ async fn test_server_query_after_sync() {
     assert_eq!(bucket_data.len(), BUCKET_BYTES);
 
     let found = bucket_data
-        .chunks_exact(32)
-        .any(|chunk| chunk == nf.as_slice());
+        .chunks_exact(spend_types::ENTRY_BYTES)
+        .any(|chunk| chunk[..32] == nf[..]);
     assert!(found, "queried nullifier not found in bucket response");
 }
 
@@ -503,7 +503,17 @@ async fn test_server_follow_new_block() {
 
     // Simulate follow: insert a new block
     let new_nfs = vec![make_nf(99_000), make_nf(99_001)];
-    hashtable.insert_block(11, hash_for(11), &new_nfs).unwrap();
+    let new_nwms: Vec<spend_types::NullifierWithMeta> = new_nfs
+        .iter()
+        .map(|nf| spend_types::NullifierWithMeta {
+            nullifier: *nf,
+            first_output_position: 0,
+            action_count: 1,
+        })
+        .collect();
+    hashtable
+        .insert_block(11, hash_for(11), &new_nwms)
+        .unwrap();
     hashtable.evict_to_target();
 
     // Rebuild PIR and swap (as the follow loop does)
@@ -534,8 +544,8 @@ async fn test_server_follow_new_block() {
                 .answer_query(&pir_state.engine_state, &bucket_idx.to_le_bytes())
                 .unwrap();
             let found = result
-                .chunks_exact(32)
-                .any(|chunk| chunk == new_nfs[0].as_slice());
+                .chunks_exact(spend_types::ENTRY_BYTES)
+                .any(|chunk| chunk[..32] == new_nfs[0][..]);
             assert!(found, "new nullifier should be queryable after follow");
         }
         None => panic!("expected PIR state"),
@@ -564,10 +574,18 @@ async fn test_server_reorg_handling() {
     // Simulate reorg: rollback block 10, insert replacement
     hashtable.rollback_block(&hash_for(10)).unwrap();
     let replacement_nfs = vec![make_nf(88_000), make_nf(88_001), make_nf(88_002)];
+    let replacement_nwms: Vec<spend_types::NullifierWithMeta> = replacement_nfs
+        .iter()
+        .map(|nf| spend_types::NullifierWithMeta {
+            nullifier: *nf,
+            first_output_position: 0,
+            action_count: 1,
+        })
+        .collect();
     let mut new_hash_10 = [0u8; 32];
     new_hash_10[0] = 0xAA;
     hashtable
-        .insert_block(10, new_hash_10, &replacement_nfs)
+        .insert_block(10, new_hash_10, &replacement_nwms)
         .unwrap();
     hashtable.evict_to_target();
 
@@ -604,7 +622,9 @@ async fn test_server_reorg_handling() {
                 let result = engine
                     .answer_query(&pir_state.engine_state, &bucket_idx.to_le_bytes())
                     .unwrap();
-                let found = result.chunks_exact(32).any(|chunk| chunk == nf.as_slice());
+                let found = result
+                    .chunks_exact(spend_types::ENTRY_BYTES)
+                    .any(|chunk| chunk[..32] == nf[..]);
                 assert!(found, "replacement nf not in PIR query result");
             }
         }

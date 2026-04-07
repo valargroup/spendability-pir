@@ -39,15 +39,22 @@ fn bench_ypir_performance() {
     let mut db_bytes = vec![0u8; NUM_BUCKETS * BUCKET_BYTES];
     let num_nfs = 1000;
     let mut nfs = Vec::with_capacity(num_nfs);
+    let zero_entry = [0u8; ENTRY_BYTES];
     for i in 0..num_nfs {
         let nf = make_nf(i as u32 * 7 + 1);
         let bucket_idx = hash_to_bucket(&nf) as usize;
         let offset = bucket_idx * BUCKET_BYTES;
-        // Find first free slot in bucket
         for slot in 0..112 {
             let slot_offset = offset + slot * ENTRY_BYTES;
-            if db_bytes[slot_offset..slot_offset + ENTRY_BYTES] == [0u8; 32] {
-                db_bytes[slot_offset..slot_offset + ENTRY_BYTES].copy_from_slice(&nf);
+            if db_bytes[slot_offset..slot_offset + ENTRY_BYTES] == zero_entry {
+                let entry = spend_types::NullifierEntry {
+                    nullifier: nf,
+                    spend_height: 1,
+                    first_output_position: 0,
+                    action_count: 1,
+                };
+                db_bytes[slot_offset..slot_offset + ENTRY_BYTES]
+                    .copy_from_slice(&entry.to_bytes());
                 nfs.push(nf);
                 break;
             }
@@ -114,7 +121,7 @@ fn bench_ypir_performance() {
     let bucket_data = &decoded[..BUCKET_BYTES];
     let found = bucket_data
         .chunks_exact(ENTRY_BYTES)
-        .any(|chunk| chunk == nfs[0].as_slice());
+        .any(|chunk| chunk[..32] == nfs[0][..]);
     assert!(found, "benchmark correctness check failed");
 
     // Measure query generation time

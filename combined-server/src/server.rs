@@ -302,6 +302,8 @@ pub async fn run<
         ChainTracker::with_tip(follow_height, follow_hash, CONFIRMATION_DEPTH as usize * 2);
     let mut current_height = follow_height;
     let mut blocks_since_snapshot: u64 = 0;
+    #[cfg(feature = "nullifier")]
+    let mut nf_prev_tree_size: Option<u32> = None;
 
     loop {
         let (tip_height, _) = client.get_latest_block().await?;
@@ -321,7 +323,8 @@ pub async fn run<
             let prev_hash = to_hash_array(&block.prev_hash);
 
             #[cfg(feature = "nullifier")]
-            let nullifiers = nf_ingest::extract_nullifiers(block);
+            let (nullifiers, nf_this_tree_size) =
+                nf_ingest::extract_nullifiers_with_meta(block, nf_prev_tree_size);
             #[cfg(feature = "witness")]
             let commitments = commitment_ingest::extract_commitments(block);
 
@@ -333,6 +336,7 @@ pub async fn run<
                             tracing::warn!(height, error = %e, "nullifier insert failed");
                         }
                         hashtable.evict_to_target();
+                        nf_prev_tree_size = nf_this_tree_size;
                     }
 
                     #[cfg(feature = "witness")]
@@ -377,6 +381,7 @@ pub async fn run<
                         if let Err(e) = hashtable.insert_block(height, hash, &nullifiers) {
                             tracing::warn!(height, error = %e, "nullifier insert after reorg failed");
                         }
+                        nf_prev_tree_size = nf_this_tree_size;
                     }
 
                     #[cfg(feature = "witness")]
@@ -455,7 +460,7 @@ async fn catch_up_nullifier(
     hashtable: &mut HashTableDb,
 ) -> Result<()> {
     let phase = arc_swap::ArcSwap::from_pointee(ServerPhase::Serving);
-    spend_server::server::sync_range(lwd_urls, from, to, hashtable, &phase)
+    spend_server::server::sync_range(lwd_urls, from, to, hashtable, None, &phase)
         .await
         .map_err(ServerError::Nullifier)?;
     hashtable.evict_to_target();

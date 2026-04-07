@@ -2,7 +2,7 @@ mod mock_server;
 
 use hashtable_pir::HashTableDb;
 use mock_server::{make_compact_block, spawn_mock_server, MockState};
-use spend_types::ChainEvent;
+use spend_types::{ChainEvent, NullifierWithMeta};
 
 fn hash_for(n: u16) -> [u8; 32] {
     let mut h = [0u8; 32];
@@ -17,6 +17,16 @@ fn make_nf(seed: u32) -> [u8; 32] {
         *byte = ((seed >> ((i % 4) * 8)) as u8).wrapping_add(i as u8);
     }
     nf
+}
+
+fn nfs_to_nwms(nfs: &[[u8; 32]]) -> Vec<NullifierWithMeta> {
+    nfs.iter()
+        .map(|nf| NullifierWithMeta {
+            nullifier: *nf,
+            first_output_position: 0,
+            action_count: nfs.len() as u8,
+        })
+        .collect()
 }
 
 /// Build a chain of compact blocks, each with `nfs_per_block` random nullifiers.
@@ -55,7 +65,7 @@ async fn test_sync_into_hashtable() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
     let sync_handle = tokio::spawn(async move {
-        nf_ingest::ingest::sync(&mut client, 1, 500, &tx)
+        nf_ingest::ingest::sync(&mut client, 1, 500, None, &tx)
             .await
             .unwrap();
     });
@@ -63,7 +73,6 @@ async fn test_sync_into_hashtable() {
     let mut db = HashTableDb::new();
     let mut events_received = 0;
 
-    // Drain channel until sync completes and sender is dropped
     let drain_handle = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -97,7 +106,6 @@ async fn test_sync_into_hashtable() {
     assert_eq!(db.earliest_height(), Some(1));
     assert_eq!(db.latest_height(), Some(500));
 
-    // Spot-check: verify a sample of known nullifiers are present
     for block_nfs in all_nfs.iter().step_by(50) {
         for nf in block_nfs {
             assert!(db.contains(nf), "known nullifier not found in hashtable");
@@ -109,7 +117,6 @@ async fn test_sync_into_hashtable() {
 async fn test_sync_reorg_rollback_and_snapshot() {
     let state = MockState::new();
 
-    // Phase 1: Sync initial chain of 100 blocks
     let (blocks, all_nfs) = build_chain(100, 5);
     state.set_blocks(blocks);
 
@@ -119,7 +126,7 @@ async fn test_sync_reorg_rollback_and_snapshot() {
         .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
-    nf_ingest::ingest::sync(&mut client, 1, 100, &tx)
+    nf_ingest::ingest::sync(&mut client, 1, 100, None, &tx)
         .await
         .unwrap();
     drop(tx);
@@ -139,7 +146,6 @@ async fn test_sync_reorg_rollback_and_snapshot() {
     assert_eq!(db.len(), 500);
     assert_eq!(db.latest_height(), Some(100));
 
-    // Phase 2: Simulate rollback of the last 2 blocks
     let hash_99 = hash_for(99);
     let hash_100 = hash_for(100);
     db.rollback_block(&hash_100).unwrap();
@@ -147,7 +153,6 @@ async fn test_sync_reorg_rollback_and_snapshot() {
     assert_eq!(db.len(), 490);
     assert_eq!(db.latest_height(), Some(98));
 
-    // Verify orphaned nfs are gone
     for nf in &all_nfs[98] {
         assert!(!db.contains(nf), "orphaned nf from block 99 should be gone");
     }
@@ -158,7 +163,6 @@ async fn test_sync_reorg_rollback_and_snapshot() {
         );
     }
 
-    // Phase 3: Insert replacement blocks (the "new chain" after reorg)
     let replacement_nfs_99: Vec<[u8; 32]> = (0..5).map(|j| make_nf(99_000 + j)).collect();
     let replacement_nfs_100: Vec<[u8; 32]> = (0..5).map(|j| make_nf(100_000 + j)).collect();
     let mut new_hash_99 = [0u8; 32];
@@ -166,9 +170,9 @@ async fn test_sync_reorg_rollback_and_snapshot() {
     let mut new_hash_100 = [0u8; 32];
     new_hash_100[0] = 0xBB;
 
-    db.insert_block(99, new_hash_99, &replacement_nfs_99)
+    db.insert_block(99, new_hash_99, &nfs_to_nwms(&replacement_nfs_99))
         .unwrap();
-    db.insert_block(100, new_hash_100, &replacement_nfs_100)
+    db.insert_block(100, new_hash_100, &nfs_to_nwms(&replacement_nfs_100))
         .unwrap();
     assert_eq!(db.len(), 500);
 
@@ -179,7 +183,6 @@ async fn test_sync_reorg_rollback_and_snapshot() {
         assert!(db.contains(nf), "new block 100 nf should be present");
     }
 
-    // Phase 4: Snapshot roundtrip
     let snap = db.to_snapshot();
     let restored = HashTableDb::from_snapshot(&snap).unwrap();
 
@@ -188,7 +191,6 @@ async fn test_sync_reorg_rollback_and_snapshot() {
     assert_eq!(restored.latest_height(), db.latest_height());
     assert_eq!(restored.num_blocks(), db.num_blocks());
 
-    // Verify all non-orphaned nfs survive the snapshot roundtrip
     for (i, block_nfs) in all_nfs.iter().enumerate().take(98) {
         for nf in block_nfs {
             assert!(
@@ -212,8 +214,6 @@ async fn test_sync_reorg_rollback_and_snapshot() {
 async fn test_eviction_during_sync() {
     let state = MockState::new();
 
-    // Create a large chain to test eviction behavior (not at TARGET_SIZE scale,
-    // but enough to verify the eviction path works).
     let (blocks, _all_nfs) = build_chain(200, 10);
     state.set_blocks(blocks);
 
@@ -223,7 +223,7 @@ async fn test_eviction_during_sync() {
         .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(500);
-    nf_ingest::ingest::sync(&mut client, 1, 200, &tx)
+    nf_ingest::ingest::sync(&mut client, 1, 200, None, &tx)
         .await
         .unwrap();
     drop(tx);
@@ -241,9 +241,8 @@ async fn test_eviction_during_sync() {
         }
     }
 
-    assert_eq!(db.len(), 2000); // 200 blocks * 10 nfs each
+    assert_eq!(db.len(), 2000);
 
-    // Evict the oldest 50 blocks
     for _ in 0..50 {
         db.evict_oldest_block();
     }

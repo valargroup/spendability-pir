@@ -102,6 +102,7 @@ pub async fn sync_range(
     from: u64,
     to: u64,
     hashtable: &mut HashTableDb,
+    initial_tree_size: Option<u32>,
     phase: &arc_swap::ArcSwap<ServerPhase>,
 ) -> Result<()> {
     if from > to {
@@ -113,7 +114,9 @@ pub async fn sync_range(
         let mut client = nf_ingest::LwdClient::connect(lwd_urls)
             .await
             .map_err(nf_ingest::ingest::IngestError::from)?;
-        tokio::spawn(async move { nf_ingest::ingest::sync(&mut client, from, to, &tx).await })
+        tokio::spawn(async move {
+            nf_ingest::ingest::sync(&mut client, from, to, initial_tree_size, &tx).await
+        })
     };
 
     while let Some(event) = rx.recv().await {
@@ -203,6 +206,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
             forward_start,
             tip_height,
             &mut hashtable,
+            None,
             &app_state.phase,
         )
         .await?;
@@ -225,6 +229,7 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
                 backfill_start,
                 backfill_end,
                 &mut hashtable,
+                None,
                 &app_state.phase,
             )
             .await?;
@@ -282,7 +287,8 @@ pub async fn run<P: PirEngine + 'static>(config: ServerConfig, engine: Arc<P>) -
             .await
             .map_err(nf_ingest::ingest::IngestError::from)?;
         tokio::spawn(async move {
-            nf_ingest::ingest::follow(&mut follow_client, latest_height, latest_hash, &tx).await
+            nf_ingest::ingest::follow(&mut follow_client, latest_height, latest_hash, None, &tx)
+                .await
         })
     };
 
@@ -383,6 +389,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
             forward_start,
             tip_height,
             &mut hashtable,
+            None,
             &app_state.phase,
         )
         .await?;
@@ -397,6 +404,7 @@ pub async fn run_sync_only<P: PirEngine + 'static>(
                 backfill_start,
                 backfill_end,
                 &mut hashtable,
+                None,
                 &app_state.phase,
             )
             .await?;
