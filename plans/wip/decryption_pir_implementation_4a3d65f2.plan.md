@@ -10,7 +10,7 @@ todos:
     status: done
   - id: phase-1c
     content: "Create decryption-db crate: flat store, append/rollback, PIR DB builder, snapshot, tests"
-    status: pending
+    status: done
   - id: phase-2a
     content: "Create decryption-server crate: Axum routes, PirEngine, rebuild_pir, PIR round-trip test"
     status: pending

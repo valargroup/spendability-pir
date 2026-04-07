@@ -532,6 +532,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "decryption-db"
+version = "0.1.0"
+dependencies = [
+ "decryption-types",
+ "thiserror",
+ "witness-types",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "decryption-types"
 version = "0.1.0"
 dependencies = [
