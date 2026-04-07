@@ -502,7 +502,7 @@ async fn test_server_follow_new_block() {
     assert_eq!(hashtable.latest_height(), Some(10));
 
     // Simulate follow: insert a new block
-    let new_nfs = vec![make_nf(99_000), make_nf(99_001)];
+    let new_nfs = [make_nf(99_000), make_nf(99_001)];
     let new_nwms: Vec<spend_types::NullifierWithMeta> = new_nfs
         .iter()
         .map(|nf| spend_types::NullifierWithMeta {
