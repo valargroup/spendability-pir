@@ -215,16 +215,27 @@ Three gates normally force `spendableValue` to zero during sync. When `spendabil
 
 ### Change note discovery
 
-After nullifier PIR identifies a spent note, the wallet discovers change outputs from the same spending transaction — without waiting for the scanner to reach that block.
+After nullifier PIR identifies a spent note, the wallet discovers change outputs from the same spending transaction — without waiting for the scanner to reach that block. Because change notes can themselves be spent in subsequent transactions, the wallet follows the full spend chain recursively to determine the actual spendable balance.
 
-For each spent note, the `SpendMetadata` returned by PIR provides the exact location of the transaction's Orchard actions in the commitment tree (`first_output_position`, `action_count`) and the block height (`spend_height`). The wallet:
+For each spent note, the `SpendMetadata` returned by PIR provides the exact location of the transaction's Orchard actions in the commitment tree (`first_output_position`, `action_count`) and the block height (`spend_height`).
+
+**Phase 1 — Canonical notes:** For each note in `orchard_received_notes` that PIR identifies as spent, the wallet:
 
 1. Downloads the single compact block at `spend_height` via lightwalletd RPC
 2. Extracts the `action_count` compact actions starting at `first_output_position`
 3. Trial-decrypts each action using the account's Orchard FVK (both internal and external scopes)
-4. Stores any discovered notes in `pir_provisional_notes` with their full note fields (diversifier, rseed, rho, nullifier, cmx) — enough to reconstruct the note for spending once a witness is obtained
+4. Stores discovered notes in `pir_provisional_notes` at depth 1, with their full note fields (diversifier, rseed, rho, nullifier, cmx) — enough to reconstruct the note for spending once a witness is obtained
 
-Provisional notes contribute to the wallet balance in `get_wallet_summary`: witnessed notes (`has_pir_witness = 1`) add to `spendable_value`, unwitnessed notes add to `value_pending_spendability`. When the canonical scanner later processes the same block and inserts the note into `orchard_received_notes`, the provisional row is deleted automatically (reconciliation by matching `commitment_tree_position`).
+**Phase 2 — Recursive chain:** The wallet then iteratively processes provisional notes:
+
+1. Reads all provisional notes with `pir_checked = 0`
+2. PIR-checks their nullifiers to determine if they too have been spent
+3. For each spent provisional, repeats the block download and trial decryption at `depth + 1`
+4. Continues until no unchecked provisionals remain or a safety cap (`maxDepth`, default 20) is reached
+
+Only active leaf nodes — provisional notes where `is_spent = 0` and `discovered_by_scanner = 0` — contribute to the wallet balance in `get_wallet_summary`. Witnessed leaves (`has_pir_witness = 1`) add to `spendable_value`; unwitnessed leaves add to `value_pending_spendability`.
+
+When the canonical scanner later processes a block and inserts a note into `orchard_received_notes` at the same commitment tree position, the provisional row is marked `discovered_by_scanner = 1` rather than deleted. This preserves the recursive chain — descendants of the reconciled note remain valid. If the reconciled provisional was PIR-marked as spent, that status is propagated to `pir_spent_notes` for the canonical note.
 
 This is the v1 data source path. A future v2 will replace the RPC block download with Decryption PIR queries, removing the need to fetch the full compact block.
 

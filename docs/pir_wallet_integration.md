@@ -109,17 +109,31 @@ The nullifier PIR flow is split across multiple FFI functions to keep network I/
 - `zcashlc_get_pir_pending_spends` — reads PIR-detected spends not yet confirmed by scanning (for transaction list placeholders)
 
 **Change note discovery** (in `lib.rs`, accessed through `@DBActor`):
-- `zcashlc_discover_change_notes` — given a `spent_note_id` and the serialized `CompactBlock` at `spend_height`, trial-decrypts the actions in the `[first_output_position, first_output_position + action_count)` range using the account's Orchard FVK (both internal and external scopes). Inserts discovered notes into `pir_provisional_notes` and returns JSON `[{"position": u64, "value": u64, "provisional_note_id": i64}]`
+- `zcashlc_discover_change_notes` — given a `spent_note_id`, `depth`, `parent_provisional_id`, and the serialized `CompactBlock` at `spend_height`, trial-decrypts the actions in the `[first_output_position, first_output_position + action_count)` range using the account's Orchard FVK (both internal and external scopes). Inserts discovered notes into `pir_provisional_notes` with their depth and parent linkage, and returns JSON `[{"position": u64, "value": u64, "provisional_note_id": i64}]`. `depth` is the hop count from the canonical note (1 = direct change); `parent_provisional_id` is -1 for depth-1 notes whose parent is canonical.
+- `zcashlc_get_provisional_notes_for_pir` — returns provisional notes whose nullifiers have not yet been PIR-checked (`pir_checked = 0`). Returns JSON `[{"id": i64, "nf": [u8], "value": u64, "spent_note_id": i64, "depth": u32}]`. Used by Phase 2 of the recursive loop to find provisional notes needing nullifier PIR.
+- `zcashlc_mark_provisional_pir_results` — batch-updates provisional notes after PIR nullifier checks. Takes JSON `[{"id": i64, "spent": bool}]`, sets `pir_checked = 1` on each note and `is_spent = 1` for spent notes. The `is_spent` flag is monotonic (`MAX(is_spent, :is_spent)`) — once marked spent, a note cannot be un-spent by a later call.
 - `zcashlc_mark_provisional_note_witnessed` — sets `has_pir_witness = 1` on a provisional note after a PIR witness is obtained
 
 #### Swift Orchestration
 
-`SDKSynchronizer.checkWalletSpendability(pirServerUrl, progress)`:
+`SDKSynchronizer.checkWalletSpendability(pirServerUrl, progress, maxDepth)`:
+
+**Phase 1 — Canonical notes:**
 1. Read unspent notes via `getUnspentOrchardNotesForPIR()`
 2. Call `SpendabilityBackend().checkNullifiersPIR()` (network, runs on detached task)
 3. Write back spent results via `insertPIRSpentNotes()`
-4. Discover change notes: for each spent note, download the compact block at `metadata.spendHeight` via `lightWalletService.blockRange`, then call `discoverChangeNotes` to trial-decrypt and store provisional notes. Failures are per-note — a failed discovery does not block the overall flow.
-5. Return `SpendabilityResult` (spent note IDs, total value, height range)
+4. Discover depth-1 change notes: for each spent note, download the compact block at `metadata.spendHeight` via `lightWalletService.blockRange`, then call `discoverChangeNotes(depth: 1, parentProvisionalId: -1)` to trial-decrypt and store provisional notes
+
+**Phase 2 — Recursive provisional chain:**
+5. Loop up to `maxDepth` iterations (default 20, a safety cap):
+   a. Read unchecked provisional notes via `getProvisionalNotesForPIR()`
+   b. If none remain, the chain is fully resolved — break
+   c. PIR-check their nullifiers via `checkNullifiersPIR()`
+   d. Mark results via `markProvisionalPIRResults()`
+   e. For each spent provisional note, download the compact block and call `discoverChangeNotes(depth: provisional.depth + 1, parentProvisionalId: provisional.id)`
+6. Return `SpendabilityResult` (spent note IDs, total value, height range)
+
+Failures in either phase are per-note — a failed block download or decryption does not block other notes. Phase 2 terminates when no more unchecked provisionals exist (chain fully resolved) or the iteration cap is reached.
 
 #### App Trigger
 
@@ -309,35 +323,60 @@ CREATE TABLE pir_provisional_notes (
     nullifier BLOB NOT NULL UNIQUE,
     cmx BLOB NOT NULL,
     spend_height INTEGER NOT NULL,
-    has_pir_witness INTEGER NOT NULL DEFAULT 0
+    has_pir_witness INTEGER NOT NULL DEFAULT 0,
+    depth INTEGER NOT NULL DEFAULT 1,
+    parent_provisional_id INTEGER REFERENCES pir_provisional_notes(id),
+    pir_checked INTEGER NOT NULL DEFAULT 0,
+    is_spent INTEGER NOT NULL DEFAULT 0,
+    discovered_by_scanner INTEGER NOT NULL DEFAULT 0
 )
 ```
 
 - `account_id`: references `accounts(id)` — the account that owns the discovered change note
-- `spent_note_id`: the `orchard_received_notes.id` of the note whose spend revealed this change output
+- `spent_note_id`: the `orchard_received_notes.id` of the note whose spend revealed this change output (at depth 1, this is a canonical note; at deeper levels, it is the canonical note that started the chain, used for account FVK lookup)
 - `position`: the note's global Orchard commitment tree position, used as a deduplication key
 - `diversifier`, `rseed`, `rho`, `nullifier`, `cmx`: Orchard note fields extracted via trial decryption — sufficient to reconstruct the note for spending once a witness is obtained
 - `has_pir_witness`: `0` = discovered but not yet witnessed; `1` = PIR witness obtained, eligible for spendable balance
+- `depth`: hop count from the canonical note — 1 = direct change, 2 = change-of-change, etc.
+- `parent_provisional_id`: self-referential FK to the provisional note whose spend revealed this note; `NULL` for depth-1 notes (whose parent is a canonical `orchard_received_notes` row)
+- `pir_checked`: `0` = nullifier not yet PIR-checked; `1` = PIR check completed (spent or unspent)
+- `is_spent`: `0` = unspent (or not yet checked); `1` = PIR confirmed this note's nullifier is on-chain. Monotonic — once set to 1, cannot revert to 0.
+- `discovered_by_scanner`: `0` = provisional only; `1` = the canonical scanner has inserted this note into `orchard_received_notes`. When set, this row is excluded from balance calculations to prevent double-counting with the canonical note.
 
-**Integration point — `get_wallet_summary` balance:** When `spendability-pir` is enabled, provisional notes contribute to the Orchard balance in `get_wallet_summary`. Witnessed notes (`has_pir_witness = 1`) add to `spendable_value`; unwitnessed notes add to `value_pending_spendability`.
+**Integration point — `get_wallet_summary` balance:** When `spendability-pir` is enabled, provisional notes contribute to the Orchard balance in `get_wallet_summary`, filtered to only active leaf nodes: `WHERE is_spent = 0 AND discovered_by_scanner = 0`. Mid-chain spent notes (whose value has flowed into deeper change notes) and scanner-reconciled notes (whose canonical row now exists) are excluded. Among qualifying notes, witnessed notes (`has_pir_witness = 1`) add to `spendable_value`; unwitnessed notes add to `value_pending_spendability`.
 
-**Integration point — scanner reconciliation:** When the canonical scanner inserts an Orchard note via `put_received_note` with a matching `commitment_tree_position`, the corresponding provisional row is deleted. This prevents double-counting — canonical data supersedes the provisional hint.
+**Integration point — scanner reconciliation:** When the canonical scanner inserts an Orchard note via `put_received_note` with a matching `commitment_tree_position`, `reconcile_provisional_for_position` marks the provisional row `discovered_by_scanner = 1` rather than deleting it. This preserves the recursive chain — any descendants of the reconciled note remain valid in the DB. If the provisional note was PIR-marked as spent (`is_spent = 1`), the canonical note's ID is inserted into `pir_spent_notes`, propagating the spend status to the canonical note and preventing double-counting.
 
 **Lifecycle:**
 
 ```
-Spent note detected ──> Download block ──> Trial-decrypt ──> INSERT into
-  (nullifier PIR)         (RPC)             (change_discovery)  pir_provisional_notes
-                                                                    │
-                                                 ┌──────────────────┤
-                                                 ▼                  ▼
-                                          PIR witness          Scanner inserts
-                                          obtained ──>         canonical note ──>
-                                          has_pir_witness=1    DELETE provisional row
+Phase 1: Canonical note spent
+  Nullifier PIR ──> SpendMetadata ──> Download block ──> Trial-decrypt
+                                        (RPC)             (change_discovery)
+                                                               │
+                                                               ▼
+                                                    INSERT depth=1 provisional
+                                                               │
+Phase 2: Recursive chain resolution        ┌───────────────────┤
+                                           ▼                   ▼
+                                    PIR-check nullifier   PIR witness obtained
+                                           │              ──> has_pir_witness=1
+                                    ┌──────┴──────┐
+                                    ▼             ▼
+                              is_spent=0     is_spent=1 ──> Download block
+                              (leaf note,       │           ──> Trial-decrypt
+                               counts in        │           ──> INSERT depth+1
+                               balance)         │               provisional
+                                                │           (repeat Phase 2)
+                                                ▼
+Scanner reconciliation:                   discovered_by_scanner=1
+  Scanner inserts canonical note ──>      (excludes from balance)
+  at matching position                    If is_spent=1:
+                                            INSERT canonical note_id
+                                            into pir_spent_notes
 
 Cleared by:
   • truncate_to_height (reorg/rescan)  ──> DELETE FROM pir_provisional_notes
-  • Scanner reconciliation              ──> DELETE by matching position
 ```
 
 All three tables are created unconditionally by their migrations (schema is identical across all builds). When the corresponding feature is off, the tables are empty and unused.
@@ -395,7 +434,8 @@ getWalletSummary (Swift)      chainTipUpdated gates    Orchard: preserved if
 - `spent_notes_clause` excludes PIR-marked spent notes from all balance and selection queries.
 - Notes NOT in `pir_spent_notes` have been confirmed unspent by PIR's on-chain nullifier check.
 - Provisional change notes are inserted with `INSERT OR IGNORE` keyed on `position`, making discovery idempotent across retries.
-- Provisional notes are automatically deleted when the canonical scanner inserts the same note (by matching `commitment_tree_position`), preventing double-counting.
+- When the canonical scanner inserts a note at the same position, the provisional row is marked `discovered_by_scanner = 1` (not deleted), preserving the recursive chain. The balance query excludes scanner-reconciled rows, preventing double-counting. If the provisional was PIR-spent, the canonical note ID is inserted into `pir_spent_notes` to propagate the spend status.
+- The `is_spent` flag on provisional notes is monotonic — once PIR confirms a note as spent, the flag cannot revert. This prevents inconsistency from retry or out-of-order updates.
 - Notes with PIR witnesses can construct valid spend proofs using the server-provided authentication path, which is self-verified against the anchor root.
 - Invalid PIR witnesses are rejected before persistence, and stale snapshots do not overwrite newer witness rows.
 - If PIR servers are unreachable, `pir_spent_notes`, `pir_provisional_notes`, and `pir_witness_data` are empty. The wallet falls back to standard scanning behavior — spendability is delayed but never blocked. No funds are lost.
@@ -416,8 +456,8 @@ Two Cargo features in `zcash_client_sqlite` control PIR integration:
 | `unscanned_tip_exists` (Orchard) | Checked normally | Bypassed (skipped) |
 | `pir_provisional_notes` table | Exists (migration unconditional) | Exists |
 | `pir_provisional` module | Not compiled | Compiled |
-| `get_wallet_summary` (Orchard) | No provisional note contribution | Provisional notes added to spendable/pending balance |
-| Scanner reconciliation | No provisional cleanup | Deletes provisional row when canonical note inserted |
+| `get_wallet_summary` (Orchard) | No provisional note contribution | Active leaf provisional notes (not spent, not scanner-reconciled) added to spendable/pending balance |
+| Scanner reconciliation | No provisional cleanup | Marks provisional `discovered_by_scanner = 1`; propagates `is_spent` to `pir_spent_notes` for canonical note |
 | `truncate_to_height` | DELETE is a no-op (empty tables) | Clears `pir_spent_notes` and `pir_provisional_notes` |
 
 ### `sync-witness-pir`
