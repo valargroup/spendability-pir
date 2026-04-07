@@ -162,16 +162,18 @@ Queries are issued **per-note** via `WitnessClientBlocking::get_witness`. If a q
 
 **DB helpers** (in `lib.rs`, accessed through `@DBActor`):
 - `zcashlc_get_notes_needing_pir_witness` — reads notes that have a tree position, are unspent, and lack a PIR witness
-- `zcashlc_insert_pir_witnesses` — stores witness data into `pir_witness_data`
+- `zcashlc_get_pir_witness_notes_for_proposal` — extracts the Orchard notes selected by a proposal that may need a targeted witness refresh before transaction construction
+- `zcashlc_insert_pir_witnesses` — validates and stores witness data into `pir_witness_data`
 - `zcashlc_get_pir_witnessed_notes` — lists notes with PIR witnesses (for diagnostics)
 
 #### Swift Orchestration
 
 `SDKSynchronizer.fetchNoteWitnesses(pirServerUrl, progress)`:
-1. Read notes needing witnesses via `getNotesNeedingPIRWitness()`
-2. Call `WitnessBackend().fetchWitnesses()` (network, runs on detached task)
-3. Store results via `insertPIRWitnesses()`
-4. Return `WitnessResult` (witnessed note IDs, total value)
+1. Record the witness PIR server URL in `SDKFlags` for any later proposal-scoped refresh retry
+2. Read notes needing witnesses via `getNotesNeedingPIRWitness()`
+3. Call `WitnessBackend().fetchWitnesses()` (network, runs on detached task)
+4. Store validated results via `insertPIRWitnesses()`
+5. Return `WitnessResult` (witnessed note IDs, total value)
 
 #### App Trigger
 
@@ -189,6 +191,22 @@ In `build_proposed_transaction`:
 3. Fallback reads `pir_witness_data` via `get_pir_orchard_merkle_path(position)` for each Orchard note
 4. All PIR witnesses must share the same anchor root — that root becomes the transaction's Orchard anchor
 5. If any note lacks a PIR witness, the fallback fails (the note cannot be spent yet)
+
+#### Send-Time Retry on Anchor Mismatch
+
+Witness PIR data can become stale between sync-time fetch and send-time transaction construction. If `createProposedTransactions` fails with the specific Orchard PIR anchor-mismatch errors emitted by Rust, the Swift synchronizer performs a targeted recovery flow:
+
+1. Read the last witness PIR server URL recorded by `fetchNoteWitnesses`
+2. Extract only the Orchard notes selected by the current proposal via `getPIRWitnessNotes(for:)`
+3. Re-fetch witnesses for just those notes
+4. Insert the refreshed witnesses into `pir_witness_data`
+5. Retry transaction construction once
+
+This retry is intentionally narrow:
+- It only runs for the known PIR anchor mismatch cases
+- It is scoped to proposal-selected Orchard notes, not all notes needing witnesses
+- It is skipped if no witness server URL is recorded, the proposal has no eligible Orchard notes, or the refresh returns no witnesses
+- A second transaction-construction failure is surfaced unchanged; there is no retry loop
 
 ## Database Schema
 
@@ -236,6 +254,8 @@ CREATE TABLE pir_witness_data (
 - `siblings`: 32 x 32-byte hashes = 1024 bytes — the full Merkle authentication path (leaf-to-root)
 - `anchor_height`: the chain height the witness is anchored to (server's `tip - CONFIRMATION_DEPTH`)
 - `anchor_root`: the tree root for self-verification and anchor construction
+- Insert-time invariant: before a row is written, the wallet recomputes the root from the locally stored Orchard note commitment, the note's canonical position, and the provided siblings; if the recomputed root does not equal `anchor_root`, the witness is rejected
+- Refresh invariant: if a row already exists for the same `note_id`, it is replaced only when the incoming `anchor_height` is at least as new as the stored one, so an older snapshot cannot overwrite a newer witness
 
 **Integration point — `shard_scanned_condition`:** When `sync-witness-pir` is enabled for Orchard, coin selection accepts notes that have a PIR witness even if their shard is not fully scanned:
 
@@ -321,6 +341,7 @@ getWalletSummary (Swift)      chainTipUpdated gates    Orchard: preserved if
 - `spent_notes_clause` excludes PIR-marked spent notes from all balance and selection queries.
 - Notes NOT in `pir_spent_notes` have been confirmed unspent by PIR's on-chain nullifier check.
 - Notes with PIR witnesses can construct valid spend proofs using the server-provided authentication path, which is self-verified against the anchor root.
+- Invalid PIR witnesses are rejected before persistence, and stale snapshots do not overwrite newer witness rows.
 - If PIR servers are unreachable, `pir_spent_notes` and `pir_witness_data` are empty. The wallet falls back to standard scanning behavior — spendability is delayed but never blocked. No funds are lost.
 - Newly discovered notes trigger a debounced PIR re-check within 5 seconds via `foundTransactions` / `syncReachedUpToDate`.
 
@@ -380,6 +401,8 @@ The two PIR subsystems handle failures differently:
 **Nullifier PIR** uses batch semantics: `SpendClientBlocking::check_nullifiers` processes all nullifiers in sequence. If the server is unreachable, no results are returned. The wallet degrades gracefully — it shows the balance as-is and the user can retry.
 
 **Witness PIR** uses per-note semantics: `WitnessClientBlocking::get_witness` is called individually for each note. If a query fails (e.g. `PositionOutsideWindow` because the note's position is outside the server's active shard window), the error is logged with `tracing::warn!` and that note is skipped. Other notes in the batch can still succeed. This is important because notes at different positions may fall in or out of the server's window independently.
+
+At insert time, each returned witness is validated against the wallet's stored Orchard note before it is persisted. At send time, if transaction construction fails because the selected Orchard PIR witnesses disagree on anchor/root, the SDK attempts one targeted refresh-and-retry using the last recorded witness PIR server URL. If no URL is recorded, no selected Orchard notes are eligible, or the refresh yields no witnesses, the original transaction-construction error is returned unchanged.
 
 In both cases, server unavailability is non-fatal. The wallet falls back to standard scanning — spendability is delayed but never blocked.
 
