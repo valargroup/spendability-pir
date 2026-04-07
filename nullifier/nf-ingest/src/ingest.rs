@@ -1,4 +1,4 @@
-use crate::parser::extract_nullifiers;
+use crate::parser::{extract_nullifiers_with_meta, orchard_tree_size};
 use chain_ingest::{ChainAction, ChainTracker, LwdClient};
 use spend_types::{ChainEvent, NewBlock, OrphanedBlock, CONFIRMATION_DEPTH};
 use thiserror::Error;
@@ -20,24 +20,30 @@ const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Bulk-fetch blocks from `from` to `to` (inclusive) and emit ChainEvents.
 /// No reorg detection — used during sync mode catch-up.
+///
+/// `initial_tree_size` should be the `orchardCommitmentTreeSize` from the
+/// block immediately before `from`, if known. Pass `None` on first sync.
 pub async fn sync(
     client: &mut LwdClient,
     from: u64,
     to: u64,
+    initial_tree_size: Option<u32>,
     tx: &mpsc::Sender<ChainEvent>,
 ) -> Result<()> {
     let mut current = from;
+    let mut prev_tree_size = initial_tree_size;
+
     while current <= to {
         let batch_end = (current + SYNC_BATCH_SIZE - 1).min(to);
         tracing::info!(from = current, to = batch_end, "fetching block range");
 
         let blocks = client.get_block_range(current, batch_end).await?;
 
-        for block in blocks {
+        for block in &blocks {
             let height = block.height;
             let hash = to_hash_array(&block.hash);
             let prev_hash = to_hash_array(&block.prev_hash);
-            let nullifiers = extract_nullifiers(&block);
+            let (nullifiers, this_tree_size) = extract_nullifiers_with_meta(block, prev_tree_size);
 
             tx.send(ChainEvent::NewBlock {
                 height,
@@ -47,6 +53,8 @@ pub async fn sync(
             })
             .await
             .ok();
+
+            prev_tree_size = this_tree_size;
         }
 
         current = batch_end + 1;
@@ -57,15 +65,20 @@ pub async fn sync(
 
 /// Follow the chain tip, emitting ChainEvents for new blocks and reorgs.
 /// Polls for new blocks at a fixed interval.
+///
+/// `initial_tree_size` should be the `orchardCommitmentTreeSize` at
+/// `start_height`, if known.
 pub async fn follow(
     client: &mut LwdClient,
     start_height: u64,
     start_hash: [u8; 32],
+    initial_tree_size: Option<u32>,
     tx: &mpsc::Sender<ChainEvent>,
 ) -> Result<()> {
     let mut tracker =
         ChainTracker::with_tip(start_height, start_hash, CONFIRMATION_DEPTH as usize * 2);
     let mut current_height = start_height;
+    let mut prev_tree_size = initial_tree_size;
 
     loop {
         let (tip_height, _tip_hash) = client.get_latest_block().await?;
@@ -79,11 +92,11 @@ pub async fn follow(
             .get_block_range(current_height + 1, tip_height)
             .await?;
 
-        for block in blocks {
+        for block in &blocks {
             let height = block.height;
             let hash = to_hash_array(&block.hash);
             let prev_hash = to_hash_array(&block.prev_hash);
-            let nullifiers = extract_nullifiers(&block);
+            let (nullifiers, this_tree_size) = extract_nullifiers_with_meta(block, prev_tree_size);
 
             match tracker.push_block(height, hash, prev_hash) {
                 ChainAction::Extend => {
@@ -120,8 +133,14 @@ pub async fn follow(
                     .await
                     .ok();
                     current_height = height;
+                    // After a reorg, tree size for the replacement block is
+                    // unreliable — reset so the next block uses chain_metadata.
+                    prev_tree_size = orchard_tree_size(block);
+                    continue;
                 }
             }
+
+            prev_tree_size = this_tree_size;
         }
 
         sleep(FOLLOW_POLL_INTERVAL).await;

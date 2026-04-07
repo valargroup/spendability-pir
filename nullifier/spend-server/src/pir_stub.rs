@@ -52,7 +52,7 @@ impl PirEngine for StubPirEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spend_types::{hash_to_bucket, BUCKET_BYTES, NUM_BUCKETS};
+    use spend_types::{hash_to_bucket, NullifierWithMeta, BUCKET_BYTES, ENTRY_BYTES, NUM_BUCKETS};
 
     #[test]
     fn test_stub_pir_setup_and_query() {
@@ -68,7 +68,12 @@ mod tests {
         for (i, byte) in nf.iter_mut().enumerate().skip(4) {
             *byte = i as u8;
         }
-        db.insert_block(1, [1u8; 32], &[nf]).unwrap();
+        let nwm = NullifierWithMeta {
+            nullifier: nf,
+            first_output_position: 0,
+            action_count: 1,
+        };
+        db.insert_block(1, [1u8; 32], &[nwm]).unwrap();
 
         let pir_bytes = db.to_pir_bytes();
         let state = engine.setup(&pir_bytes, &scenario).unwrap();
@@ -78,7 +83,9 @@ mod tests {
         let result = engine.answer_query(&state, &query).unwrap();
 
         assert_eq!(result.len(), BUCKET_BYTES);
-        let found = result.chunks_exact(32).any(|chunk| chunk == nf);
+        let found = result
+            .chunks_exact(ENTRY_BYTES)
+            .any(|chunk| chunk[..32] == nf[..]);
         assert!(found, "nullifier not found in returned bucket");
     }
 

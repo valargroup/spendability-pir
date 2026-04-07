@@ -39,15 +39,21 @@ fn bench_ypir_performance() {
     let mut db_bytes = vec![0u8; NUM_BUCKETS * BUCKET_BYTES];
     let num_nfs = 1000;
     let mut nfs = Vec::with_capacity(num_nfs);
+    let zero_entry = [0u8; ENTRY_BYTES];
     for i in 0..num_nfs {
         let nf = make_nf(i as u32 * 7 + 1);
         let bucket_idx = hash_to_bucket(&nf) as usize;
         let offset = bucket_idx * BUCKET_BYTES;
-        // Find first free slot in bucket
         for slot in 0..112 {
             let slot_offset = offset + slot * ENTRY_BYTES;
-            if db_bytes[slot_offset..slot_offset + ENTRY_BYTES] == [0u8; 32] {
-                db_bytes[slot_offset..slot_offset + ENTRY_BYTES].copy_from_slice(&nf);
+            if db_bytes[slot_offset..slot_offset + ENTRY_BYTES] == zero_entry {
+                let entry = spend_types::NullifierEntry {
+                    nullifier: nf,
+                    spend_height: 1,
+                    first_output_position: 0,
+                    action_count: 1,
+                };
+                db_bytes[slot_offset..slot_offset + ENTRY_BYTES].copy_from_slice(&entry.to_bytes());
                 nfs.push(nf);
                 break;
             }
@@ -114,7 +120,7 @@ fn bench_ypir_performance() {
     let bucket_data = &decoded[..BUCKET_BYTES];
     let found = bucket_data
         .chunks_exact(ENTRY_BYTES)
-        .any(|chunk| chunk == nfs[0].as_slice());
+        .any(|chunk| chunk[..32] == nfs[0][..]);
     assert!(found, "benchmark correctness check failed");
 
     // Measure query generation time
@@ -138,15 +144,20 @@ fn bench_ypir_performance() {
     println!("Query upload:   {} bytes", query_bytes.len());
     println!("Response:       {} bytes", response.len());
 
-    // Feasibility checks
+    // Feasibility check — only meaningful in release mode; debug builds are
+    // orders of magnitude slower and would always fail this.
     let rebuild_s = rebuild_time.as_secs_f64();
-    assert!(
-        rebuild_s < 75.0,
-        "PIR rebuild ({:.1}s) exceeds 75s block interval",
-        rebuild_s,
-    );
-    println!(
-        "\nFeasibility: rebuild {:.1}s < 75s block interval -> OK",
-        rebuild_s,
-    );
+    if cfg!(not(debug_assertions)) {
+        assert!(
+            rebuild_s < 75.0,
+            "PIR rebuild ({:.1}s) exceeds 75s block interval",
+            rebuild_s,
+        );
+    }
+    let verdict = if rebuild_s < 75.0 {
+        "OK"
+    } else {
+        "SKIP (debug)"
+    };
+    println!("\nFeasibility: rebuild {rebuild_s:.1}s vs 75s block interval -> {verdict}");
 }

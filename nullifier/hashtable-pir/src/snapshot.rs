@@ -1,18 +1,18 @@
 use crate::{BlockRecord, Bucket, HashTableDb, HashTableError, Result};
-use spend_types::{BUCKET_BYTES, BUCKET_CAPACITY, NUM_BUCKETS};
+use spend_types::{NullifierEntry, BUCKET_BYTES, BUCKET_CAPACITY, ENTRY_BYTES, NUM_BUCKETS};
 use std::collections::{BTreeMap, HashMap};
 use xxhash_rust::xxh64::xxh64;
 
 const SNAPSHOT_MAGIC: u64 = 0x5350_454E_4450_4952; // "SPENDPIR"
-const SNAPSHOT_VERSION: u64 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 impl HashTableDb {
     pub fn to_snapshot(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Header
-        let magic_version = SNAPSHOT_MAGIC | (SNAPSHOT_VERSION << 56);
-        buf.extend_from_slice(&magic_version.to_le_bytes());
+        // Header: magic (8 bytes) + version (4 bytes)
+        buf.extend_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
         buf.extend_from_slice(&self.latest_height().unwrap_or(0).to_le_bytes());
 
         let latest_hash = self.latest_block_hash().unwrap_or([0u8; 32]);
@@ -35,10 +35,10 @@ impl HashTableDb {
             }
         }
 
-        // Bucket data
+        // Bucket data (41-byte entries)
         for bucket in &self.buckets {
             for entry in &bucket.entries {
-                buf.extend_from_slice(entry);
+                buf.extend_from_slice(&entry.to_bytes());
             }
         }
 
@@ -50,7 +50,10 @@ impl HashTableDb {
     }
 
     pub fn from_snapshot(data: &[u8]) -> Result<Self> {
-        let min_size = 8 + 8 + 8 + 32 + 8 + 8 + (NUM_BUCKETS * BUCKET_BYTES) + 8;
+        // magic(8) + version(4) + latest_height(8) + latest_hash_height(8)
+        // + latest_hash(32) + num_entries(8) + num_blocks(8)
+        // + bucket_data(NUM_BUCKETS * BUCKET_BYTES) + checksum(8)
+        let min_size = 8 + 4 + 8 + 8 + 32 + 8 + 8 + (NUM_BUCKETS * BUCKET_BYTES) + 8;
         if data.len() < min_size {
             return Err(HashTableError::Snapshot("data too short".into()));
         }
@@ -93,8 +96,18 @@ impl HashTableDb {
             Ok(arr)
         };
 
-        // Header
-        let _magic_version = read_u64(&mut pos)?;
+        // Header: magic + version
+        let magic = read_u64(&mut pos)?;
+        if magic != SNAPSHOT_MAGIC {
+            return Err(HashTableError::Snapshot("bad magic".into()));
+        }
+        let version = read_u32(&mut pos)?;
+        if version != SNAPSHOT_VERSION {
+            return Err(HashTableError::Snapshot(format!(
+                "unsupported snapshot version {version} (expected {SNAPSHOT_VERSION})"
+            )));
+        }
+
         let _latest_height = read_u64(&mut pos)?;
         let _latest_hash_height = read_u64(&mut pos)?;
         let _latest_hash = read_bytes_32(&mut pos)?;
@@ -125,7 +138,7 @@ impl HashTableDb {
             block_index.insert(height, BlockRecord { block_hash, slots });
         }
 
-        // Bucket data
+        // Bucket data (41-byte entries)
         let bucket_data_start = pos;
         let bucket_data_end = bucket_data_start + NUM_BUCKETS * BUCKET_BYTES;
         if bucket_data_end > payload.len() {
@@ -137,14 +150,16 @@ impl HashTableDb {
             let offset = bucket_data_start + i * BUCKET_BYTES;
             let mut bucket = Bucket::new();
             for j in 0..BUCKET_CAPACITY {
-                let entry_start = offset + j * 32;
-                bucket.entries[j].copy_from_slice(&payload[entry_start..entry_start + 32]);
+                let entry_start = offset + j * ENTRY_BYTES;
+                let entry_slice: [u8; ENTRY_BYTES] = payload
+                    [entry_start..entry_start + ENTRY_BYTES]
+                    .try_into()
+                    .unwrap();
+                bucket.entries[j] = NullifierEntry::from_bytes(entry_slice);
             }
-            // Reconstruct count as the highest non-zero slot + 1
-            let zero = [0u8; 32];
             bucket.count = 0;
             for j in (0..BUCKET_CAPACITY).rev() {
-                if bucket.entries[j] != zero {
+                if !bucket.entries[j].is_empty() {
                     bucket.count = (j + 1) as u8;
                     break;
                 }

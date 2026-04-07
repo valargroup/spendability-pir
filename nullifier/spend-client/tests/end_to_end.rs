@@ -309,11 +309,11 @@ async fn test_end_to_end_is_spent() {
 
     // Test: known nullifier IS spent
     let known_nf = &all_nfs[9][2]; // block 10, third nullifier
-    let is_spent = client.is_spent(known_nf).await.unwrap();
-    assert!(is_spent, "known nullifier should be spent");
+    let meta = client.is_spent(known_nf).await.unwrap();
+    assert!(meta.is_some(), "known nullifier should be spent");
 
     // Test: random nullifier is NOT spent
     let absent_nf = make_nf(999_999);
-    let is_absent = client.is_spent(&absent_nf).await.unwrap();
-    assert!(!is_absent, "absent nullifier should not be spent");
+    let meta = client.is_spent(&absent_nf).await.unwrap();
+    assert!(meta.is_none(), "absent nullifier should not be spent");
 }

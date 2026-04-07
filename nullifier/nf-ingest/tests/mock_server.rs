@@ -322,7 +322,7 @@ async fn test_sync_stream_mock() {
         .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(200);
-    nf_ingest::ingest::sync(&mut client, 1, 100, &tx)
+    nf_ingest::ingest::sync(&mut client, 1, 100, None, &tx)
         .await
         .unwrap();
     drop(tx);
@@ -368,10 +368,9 @@ async fn test_follow_new_blocks_mock() {
         .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let follow_handle =
-        tokio::spawn(
-            async move { nf_ingest::ingest::follow(&mut client, 5, hash_for(5), &tx).await },
-        );
+    let follow_handle = tokio::spawn(async move {
+        nf_ingest::ingest::follow(&mut client, 5, hash_for(5), None, &tx).await
+    });
 
     // Add block 6 after a delay
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -418,10 +417,9 @@ async fn test_follow_reorg_mock() {
         .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let follow_handle =
-        tokio::spawn(
-            async move { nf_ingest::ingest::follow(&mut client, 3, hash_for(3), &tx).await },
-        );
+    let follow_handle = tokio::spawn(async move {
+        nf_ingest::ingest::follow(&mut client, 3, hash_for(3), None, &tx).await
+    });
 
     // Simulate reorg: replace block 3 with 3' (different hash) and add block 4
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

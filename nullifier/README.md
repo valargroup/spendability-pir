@@ -52,10 +52,10 @@ lightwalletd ──gRPC──> nf-ingest ──ChainEvent──> HashTableDb ─
                                                                                     │
                                                   Wallet ──HTTP──> spend-server ────┘
                                                     │
-                                                    └── SpendClient::is_spent(nf) -> bool
+                                                    └── SpendClient::is_spent(nf) -> Option<SpendMetadata>
 ```
 
-The PIR database is the hash table serialized row-major: each row is one bucket, containing up to `BUCKET_CAPACITY` entries of 32 bytes each. The client queries for the bucket containing its nullifier, decodes the encrypted response, and scans the bucket locally for a match. The server learns which bucket was queried but not which entry within it.
+The PIR database is the hash table serialized row-major: each row is one bucket, containing up to `BUCKET_CAPACITY` entries of 41 bytes each (32-byte nullifier + 9 bytes of spend metadata). The client queries for the bucket containing its nullifier, decodes the encrypted response, and scans the bucket locally for a match. The server learns which bucket was queried but not which entry within it.
 
 ### Why a bucketed hash table
 
@@ -67,7 +67,7 @@ The design needs to store ~1M nullifiers in a structure where each PIR query ret
 
 ### Why SimplePIR (not YPIR)
 
-The nullifier table has 16,384 rows × 3,584 bytes per row = ~56 MB. SimplePIR is used instead of YPIR because the row size (3,584 bytes = 28,672 bits) meets SimplePIR's minimum `item_size_bits` threshold. SimplePIR avoids the additional complexity and setup cost of YPIR's two-phase protocol while providing the same privacy guarantee for this database geometry.
+The nullifier table has 16,384 rows × 4,592 bytes per row = ~72 MB. SimplePIR is used instead of YPIR because the row size (4,592 bytes = 36,736 bits) exceeds SimplePIR's minimum `item_size_bits` threshold (28,672 bits). SimplePIR avoids the additional complexity and setup cost of YPIR's two-phase protocol while providing the same privacy guarantee for this database geometry.
 
 ### Table parameters
 
@@ -75,35 +75,37 @@ The nullifier table has 16,384 rows × 3,584 bytes per row = ~56 MB. SimplePIR i
 |-----------|-------|-------|
 | `NUM_BUCKETS` | 16,384 (2^14) | Hash table rows = PIR database rows |
 | `BUCKET_CAPACITY` | 112 | Max entries per bucket |
-| `ENTRY_BYTES` | 32 | Full nullifier size |
-| `BUCKET_BYTES` | 3,584 | Row size (112 × 32, meets SimplePIR minimum) |
-| `DB_BYTES` | ~56 MB | Total PIR database (16,384 × 3,584) |
+| `ENTRY_BYTES` | 41 | 32-byte nullifier + 9 bytes spend metadata |
+| `BUCKET_BYTES` | 4,592 | Row size (112 × 41, exceeds SimplePIR minimum) |
+| `DB_BYTES` | ~72 MB | Total PIR database (16,384 × 4,592) |
 | `TARGET_SIZE` | 1,000,000 | Max nullifiers before oldest-block eviction |
 | `CONFIRMATION_DEPTH` | 10 | Blocks before finalization |
 
+**Entry format**: Each 41-byte entry contains the 32-byte nullifier followed by 9 bytes of spend metadata: `spend_height` (u32 LE), `first_output_position` (u32 LE), and `action_count` (u8). The metadata enables a future Decryption PIR step to immediately locate and trial-decrypt change notes from a spending transaction without waiting for block scanning.
+
 **Bucket capacity**: At 1M nullifiers across 16,384 buckets, the average occupancy is ~61 entries per bucket. The capacity of 112 provides ~1.8× headroom. Since nullifiers are cryptographically random, bucket sizes follow a tight binomial distribution — the probability of any bucket exceeding 112 at 1M entries is negligible. If a bucket overflow occurs (bug or extreme volume), the server returns an error for that block and the block's nullifiers are not inserted.
 
-**Load factor**: At TARGET_SIZE, the table is ~55% full (61/112 average). Empty slots are zero bytes. The zero entry `[0u8; 32]` cannot collide with a real nullifier — real Orchard nullifiers are outputs of a PRF keyed by the spending key, and the probability of the all-zero output is negligible (2^-256).
+**Load factor**: At TARGET_SIZE, the table is ~55% full (61/112 average). Empty slots are `NullifierEntry::ZERO` (all zero bytes). The zero entry cannot collide with a real nullifier — real Orchard nullifiers are outputs of a PRF keyed by the spending key, and the probability of the all-zero output is negligible (2^-256).
 
 ## Client query protocol
 
-**Initialization** (once per session): `SpendClient::connect(url)` calls `GET /params` to fetch the `YpirScenario` JSON (PIR database geometry: 16,384 rows × 28,672 bits per row). The client validates `item_size_bits ≥ 28,672` (SimplePIR minimum) and initializes a `YPIRClient`. Then calls `GET /metadata` to fetch `SpendabilityMetadata` (height range, nullifier count, phase). This is cached for the session.
+**Initialization** (once per session): `SpendClient::connect(url)` calls `GET /params` to fetch the `YpirScenario` JSON (PIR database geometry: 16,384 rows × 36,736 bits per row). The client validates `item_size_bits ≥ 28,672` (SimplePIR minimum) and initializes a `YPIRClient`. Then calls `GET /metadata` to fetch `SpendabilityMetadata` (height range, nullifier count, phase). This is cached for the session.
 
 **Per-nullifier query**: For each nullifier `nf`:
 
 1. **Compute the bucket index**: `bucket_idx = hash_to_bucket(nf)` — first 4 bytes as little-endian u32, mod 16,384.
 
-2. **Generate an encrypted SimplePIR query**: `ypir_client.generate_query_simplepir(bucket_idx)` produces an encrypted query (~672 KB) encoding which row to retrieve. The server processes this against all 16,384 rows and cannot determine which row was requested.
+2. **Generate an encrypted SimplePIR query**: `ypir_client.generate_query_simplepir(bucket_idx)` produces an encrypted query encoding which row to retrieve. The server processes this against all 16,384 rows and cannot determine which row was requested.
 
-3. **Send the query** via `POST /query` (~672 KB upload). The server runs the SimplePIR online phase (~65ms), multiplying the query against the database, and returns an encrypted response (~12 KB download).
+3. **Send the query** via `POST /query`. The server runs the SimplePIR online phase, multiplying the query against the database, and returns an encrypted response.
 
-4. **Decode the response** locally to recover the bucket contents (3,584 bytes = 112 × 32-byte entries).
+4. **Decode the response** locally to recover the bucket contents (4,592 bytes = 112 × 41-byte entries).
 
-5. **Scan for a match**: Compare each 32-byte entry in the decoded bucket against `nf`. If found, the nullifier has been spent on-chain. The scan is `O(BUCKET_CAPACITY)` = O(112), trivial.
+5. **Scan for a match**: Compare each entry's 32-byte nullifier field against `nf`. If found, extract the 9-byte metadata tail as `SpendMetadata { spend_height, first_output_position, action_count }`. The scan is `O(BUCKET_CAPACITY)` = O(112), trivial.
 
 ### Batch queries (FFI path)
 
-`SpendClientBlocking::check_nullifiers` checks a batch of nullifiers sequentially, issuing one PIR query per nullifier. A progress callback reports completion fraction after each query. At ~672 KB upload + ~12 KB download per query, checking 10 notes takes ~7 MB of bandwidth and ~1 second of server time.
+`SpendClientBlocking::check_nullifiers` checks a batch of nullifiers sequentially, issuing one PIR query per nullifier. Returns `Vec<Option<SpendMetadata>>` parallel to the input — `Some(meta)` for spent nullifiers, `None` otherwise. A progress callback reports completion fraction after each query.
 
 ## Confirmation depth
 
@@ -128,21 +130,21 @@ During sync, `GET /health` reports progress (`current_height` / `target_height`)
 ### Follow mode (steady state)
 
 1. Poll lightwalletd every 2 seconds for new blocks.
-2. For each new block: insert nullifiers into the hash table, evict oldest blocks if over `TARGET_SIZE`, rebuild the PIR database (~3s), and atomic-swap via `ArcSwap`.
+2. For each new block: insert nullifiers into the hash table, evict oldest blocks if over `TARGET_SIZE`, rebuild the PIR database (~2.3s), and atomic-swap via `ArcSwap`.
 3. For reorgs: roll back orphaned blocks (remove their nullifiers by zeroing bucket slots), insert replacement blocks, rebuild PIR.
 4. Save a snapshot every `snapshot_interval` blocks (default: 100).
 
-The PIR rebuild takes ~3 seconds at 56 MB, well within the ~75-second block interval. The database is a fixed 56 MB regardless of fill level — empty slots are zero bytes. Rebuild time is constant.
+The PIR rebuild takes ~2.3 seconds at 72 MB, well within the ~75-second block interval. The database is a fixed 72 MB regardless of fill level — empty slots are zero bytes. Rebuild time is constant.
 
 ## Server memory model
 
-- **Hash table**: 56 MB (16,384 buckets × 3,584 bytes). Fixed allocation at startup.
+- **Hash table**: 72 MB (16,384 buckets × 4,592 bytes). Fixed allocation at startup.
 - **Block index**: ~1.5 MB at 1M nullifiers across ~290K blocks. BTreeMap keyed by height; each record stores block hash + slot references.
-- **Serialized PIR database**: 56 MB (identical to hash table — `to_pir_bytes()` is a direct serialization).
+- **Serialized PIR database**: 72 MB (identical to hash table — `to_pir_bytes()` is a direct serialization).
 - **PIR engine state**: ~60 MB (SimplePIR precomputed values: offline computation + server state).
-- **Total steady-state memory: ~175 MB**
+- **Total steady-state memory: ~205 MB**
 
-The ArcSwap double-buffers the PIR state during rebuilds: the old state serves queries while the new state is being built. Peak memory during a rebuild is ~235 MB (old PIR state + new PIR state + hash table).
+The ArcSwap double-buffers the PIR state during rebuilds: the old state serves queries while the new state is being built. Peak memory during a rebuild is ~265 MB (old PIR state + new PIR state + hash table).
 
 ## Eviction
 
@@ -156,11 +158,11 @@ At current volume (~3,465 nullifiers/day), `TARGET_SIZE = 1,000,000` covers ~289
 
 The snapshot system provides crash safety via atomic writes:
 
-1. **Serialize**: The hash table (bucket data + block index) is serialized into a binary format with a `SPENDPIR` magic number, version field, and xxHash64 checksum.
+1. **Serialize**: The hash table (bucket data + block index) is serialized into a binary format with a `SPENDPIR` magic number (u64), version field (u32), and xxHash64 checksum. The current snapshot version is 2, corresponding to 41-byte entries. Version 1 snapshots (32-byte entries) are rejected on load, triggering a full resync.
 2. **Write temp file**: Data is written to `snapshot.bin.tmp`, fsynced.
 3. **Atomic rename**: `snapshot.bin.tmp` → `snapshot.bin`. On POSIX systems, rename is atomic — the snapshot is either fully written or absent.
 
-On restart, the server loads the snapshot, validates the checksum, and resumes from `latest_height + 1`. A corrupted or missing snapshot triggers a full sync from scratch.
+On restart, the server loads the snapshot, validates the version and checksum, and resumes from `latest_height + 1`. A corrupted, missing, or incompatible-version snapshot triggers a full sync from scratch.
 
 Snapshots are saved after initial sync completes and periodically during follow mode (every 100 blocks by default).
 
@@ -181,11 +183,11 @@ Orphaned nullifiers are removed instantly — the table never serves stale data 
 
 | Crate | Description |
 |-------|-------------|
-| `spend-types` | Constants (`NUM_BUCKETS`, `BUCKET_CAPACITY`, `ENTRY_BYTES`, `BUCKET_BYTES`, `DB_BYTES`, `TARGET_SIZE`), `hash_to_bucket`, `ChainEvent`, `SpendabilityMetadata`. Re-exports shared types (`PirEngine`, `YpirScenario`, `ServerPhase`, `CONFIRMATION_DEPTH`) from `shared/pir-types`. |
-| `hashtable-pir` | Bucketed hash table with per-block insert/rollback, LRU eviction by height, `to_pir_bytes()` serialization, and crash-safe binary snapshots with xxHash64 checksums. |
-| `nf-ingest` | Compact block parser (`extract_nullifiers` — Orchard only, ignores Sapling) and sync/follow loops. Depends on `shared/chain-ingest` for `LwdClient` and `ChainTracker`. |
+| `spend-types` | Constants (`NUM_BUCKETS`, `BUCKET_CAPACITY`, `ENTRY_BYTES`, `BUCKET_BYTES`, `DB_BYTES`, `TARGET_SIZE`), types (`NullifierEntry`, `NullifierWithMeta`, `SpendMetadata`), `hash_to_bucket`, `ChainEvent`, `SpendabilityMetadata`. Re-exports shared types (`PirEngine`, `YpirScenario`, `ServerPhase`, `CONFIRMATION_DEPTH`) from `shared/pir-types`. |
+| `hashtable-pir` | Bucketed hash table storing `NullifierEntry` per slot, with per-block insert/rollback, LRU eviction by height, `to_pir_bytes()` serialization (41-byte entries), and crash-safe binary snapshots (v2) with xxHash64 checksums. |
+| `nf-ingest` | Compact block parser (`extract_nullifiers_with_meta` — computes `first_output_position` and `action_count` per transaction from `orchardCommitmentTreeSize` in `ChainMetadata`; Orchard only, ignores Sapling) and sync/follow loops that track `prev_tree_size` across blocks. Depends on `shared/chain-ingest` for `LwdClient` and `ChainTracker`. |
 | `spend-server` | Axum HTTP server. Sync/follow lifecycle, per-block PIR rebuilds via `ArcSwap`, async snapshot I/O. `PirEngine` trait allows swapping between stub (tests) and real YPIR (production). Exposes `build_router()` for embedding in a combined server. |
-| `spend-client` | `SpendClient` (async) and `SpendClientBlocking` (sync FFI wrapper) with `is_spent(nf)` / `check_nullifiers` APIs. Handles YPIR SimplePIR query generation, response decoding, and bucket scanning. |
+| `spend-client` | `SpendClient` (async) and `SpendClientBlocking` (sync FFI wrapper). `is_spent(nf)` returns `Option<SpendMetadata>` and `check_nullifiers` returns `Vec<Option<SpendMetadata>>` — `Some(meta)` for spent nullifiers (with spend height, output position, action count), `None` otherwise. Handles YPIR SimplePIR query generation, response decoding, and bucket scanning. |
 
 ### Feature flags
 
@@ -209,7 +211,7 @@ Three gates normally force `spendableValue` to zero during sync. When `spendabil
 
 ### FFI entry point
 
-`zcashlc_check_wallet_spendability` (C FFI in `spendability.rs`): reads unspent Orchard notes, connects to PIR server, checks each nullifier, writes spent results into `pir_spent_notes`. Handles concurrent SQLite access via retry with exponential backoff.
+`zcashlc_check_nullifiers_pir` (C FFI in `spendability.rs`): accepts nullifier bytes and a PIR server URL, connects to the PIR server, checks each nullifier, and returns a JSON `NullifierCheckResult` containing `spent: [Option<SpendMetadata>]` parallel to the input — `null` for unspent, `{ spend_height, first_output_position, action_count }` for spent. The caller (`SDKSynchronizer`) maps spent results to note IDs and writes them into `pir_spent_notes`.
 
 ### Transaction list placeholders
 
@@ -218,29 +220,21 @@ PIR-detected spends appear as synthetic "detected spend" entries in the transact
 ## Security properties
 
 - **Privacy**: SimplePIR guarantees the server learns nothing about which bucket was queried, therefore which nullifier was checked. The server sees encrypted query bytes and returns encrypted response bytes.
-- **Correctness**: Full 32-byte nullifier comparison — no false positives. A match means the exact nullifier exists in the server's hash table. False negatives are possible only if the nullifier was evicted (note spent >9 months ago at current volume) or the server hasn't ingested the block yet.
+- **Correctness**: Full 32-byte nullifier comparison within 41-byte entries — no false positives. A match means the exact nullifier exists in the server's hash table and the accompanying spend metadata is authentic (derived from the same block's `ChainMetadata`). False negatives are possible only if the nullifier was evicted (note spent >9 months ago at current volume) or the server hasn't ingested the block yet.
 - **Availability**: If the PIR server is down, the wallet falls back to normal scanning — balance updates are delayed until sync completes, but never blocked. The worst case when PIR is unreachable is the pre-PIR status quo. No funds are at risk: a transaction using a spent note is rejected at broadcast, not at construction.
 - **Integrity**: The hash table is append-only per block and eviction-only at the oldest end. Reorgs roll back nullifiers atomically. Snapshots use xxHash64 checksums to detect corruption.
 
 ## Data sizes summary (~3,465 nullifiers/day)
 
-- **PIR database**: ~56 MB (fixed)
-- **PIR bandwidth per query**: ~672 KB upload + ~12 KB download
-- **Total per spendability check**: ~684 KB (single nullifier, no broadcast needed)
-- **Batch of 10 notes**: ~6.8 MB total bandwidth, ~1s server time
-- **Snapshot size**: ~56 MB (bucket data) + ~1.5 MB (block index) ≈ ~58 MB
+- **PIR database**: ~72 MB (fixed)
+- **Snapshot size**: ~108 MB (bucket data with 41-byte entries) + ~1.5 MB (block index) ≈ ~110 MB
 
-Witness PIR comparison: ~64 MB database / ~641 KB per query. Nullifier PIR has slightly smaller database and slightly larger per-query bandwidth.
-
-### Performance (release mode)
+### Performance (release mode, measured April 2026)
 
 | Metric | Value |
 |--------|-------|
-| PIR rebuild | ~3s |
-| Server online (per query) | ~65ms |
-| Client decode | ~6ms |
-| Query upload | 672 KB |
-| Response download | 12 KB |
+| PIR rebuild | ~2.3s |
+| Round-trip (client) | ~900ms |
 
 ## Method (volume analysis)
 
