@@ -446,6 +446,7 @@ name = "commitment-ingest"
 version = "0.1.0"
 dependencies = [
  "chain-ingest",
+ "decryption-types",
  "pir-types",
  "thiserror",
  "tokio",

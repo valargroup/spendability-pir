@@ -1,9 +1,11 @@
-//! Orchard note commitment extraction from compact blocks.
+//! Orchard note commitment and decryption data extraction from compact blocks.
 //!
 //! Mirrors the nullifier parser (`nf-ingest/parser.rs`) but extracts `cmx`
-//! (note commitment) values instead of nullifiers from each `CompactOrchardAction`.
+//! (note commitment) values and decryption fields (nf, ephemeral key, ciphertext)
+//! from each `CompactOrchardAction`.
 
-use chain_ingest::proto::CompactBlock;
+use chain_ingest::proto::{CompactBlock, CompactOrchardAction};
+use decryption_types::DecryptionLeaf;
 use witness_types::Hash;
 
 /// Extracted commitments from a single compact block.
@@ -75,6 +77,67 @@ pub fn orchard_tree_size(block: &CompactBlock) -> Option<u32> {
         .filter(|&size| size > 0)
 }
 
+/// Extract decryption PIR leaf data from a compact block.
+///
+/// For each valid Orchard action (one with a 32-byte `cmx`), collects the
+/// nullifier, ephemeral key, and first 52 bytes of ciphertext. The output
+/// is 1:1 with [`extract_commitments`] — `decryption_leaves[i]` corresponds
+/// to `commitments[i]` at the same tree position.
+pub fn extract_decryption_leaves(block: &CompactBlock) -> Vec<DecryptionLeaf> {
+    let mut leaves = Vec::new();
+    for tx in &block.vtx {
+        for action in &tx.actions {
+            if action.cmx.len() == 32 {
+                leaves.push(decryption_leaf_from_action(action));
+            }
+        }
+    }
+    leaves
+}
+
+/// Extract both commitments and decryption leaves in a single pass.
+///
+/// More efficient than calling [`extract_commitments`] and
+/// [`extract_decryption_leaves`] separately when both are needed.
+/// Guarantees 1:1 correspondence between the two output vectors.
+pub fn extract_commitments_and_decryption(
+    block: &CompactBlock,
+) -> (Vec<Hash>, Vec<DecryptionLeaf>) {
+    let mut commitments = Vec::new();
+    let mut leaves = Vec::new();
+    for tx in &block.vtx {
+        for action in &tx.actions {
+            if action.cmx.len() == 32 {
+                let mut cmx = [0u8; 32];
+                cmx.copy_from_slice(&action.cmx);
+                commitments.push(cmx);
+                leaves.push(decryption_leaf_from_action(action));
+            }
+        }
+    }
+    (commitments, leaves)
+}
+
+fn decryption_leaf_from_action(action: &CompactOrchardAction) -> DecryptionLeaf {
+    let mut nf = [0u8; 32];
+    let nf_len = action.nullifier.len().min(32);
+    nf[..nf_len].copy_from_slice(&action.nullifier[..nf_len]);
+
+    let mut ephemeral_key = [0u8; 32];
+    let ek_len = action.ephemeral_key.len().min(32);
+    ephemeral_key[..ek_len].copy_from_slice(&action.ephemeral_key[..ek_len]);
+
+    let mut ciphertext = [0u8; 52];
+    let ct_len = action.ciphertext.len().min(52);
+    ciphertext[..ct_len].copy_from_slice(&action.ciphertext[..ct_len]);
+
+    DecryptionLeaf {
+        nf,
+        ephemeral_key,
+        ciphertext,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,11 +146,13 @@ mod tests {
     };
 
     fn make_action(cmx_byte: u8, nf_byte: u8) -> CompactOrchardAction {
+        let epk_byte = cmx_byte.wrapping_add(0x80);
+        let ct_byte = nf_byte.wrapping_add(0x80);
         CompactOrchardAction {
             nullifier: vec![nf_byte; 32],
             cmx: vec![cmx_byte; 32],
-            ephemeral_key: vec![0; 32],
-            ciphertext: vec![0; 52],
+            ephemeral_key: vec![epk_byte; 32],
+            ciphertext: vec![ct_byte; 52],
         }
     }
 
@@ -270,5 +335,155 @@ mod tests {
         assert_eq!(cmxs[0], [0x01; 32]);
         assert_eq!(cmxs[1], [0x02; 32]);
         assert_eq!(cmxs[2], [0x03; 32]);
+    }
+
+    // -- Decryption leaf extraction tests --
+
+    #[test]
+    fn extract_decryption_basic() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![CompactTx {
+                actions: vec![make_action(0xAA, 0x11), make_action(0xBB, 0x22)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let leaves = extract_decryption_leaves(&block);
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].nf, [0x11; 32]);
+        assert_eq!(leaves[0].ephemeral_key, [0xAA_u8.wrapping_add(0x80); 32]);
+        assert_eq!(leaves[0].ciphertext, [0x11_u8.wrapping_add(0x80); 52]);
+        assert_eq!(leaves[1].nf, [0x22; 32]);
+    }
+
+    #[test]
+    fn extract_decryption_empty_block() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![],
+            ..Default::default()
+        };
+        assert!(extract_decryption_leaves(&block).is_empty());
+    }
+
+    #[test]
+    fn extract_decryption_ignores_sapling() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![CompactTx {
+                outputs: vec![make_sapling_output(0xCC)],
+                actions: vec![make_action(0xDD, 0x33)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let leaves = extract_decryption_leaves(&block);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].nf, [0x33; 32]);
+    }
+
+    #[test]
+    fn extract_decryption_skips_short_cmx() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![CompactTx {
+                actions: vec![CompactOrchardAction {
+                    nullifier: vec![0x11; 32],
+                    cmx: vec![0xFF; 16],
+                    ephemeral_key: vec![0x22; 32],
+                    ciphertext: vec![0x33; 52],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(extract_decryption_leaves(&block).is_empty());
+    }
+
+    #[test]
+    fn combined_extraction_one_to_one() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![
+                CompactTx {
+                    actions: vec![make_action(0x01, 0xA1), make_action(0x02, 0xA2)],
+                    ..Default::default()
+                },
+                CompactTx {
+                    actions: vec![make_action(0x03, 0xA3)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (cmxs, leaves) = extract_commitments_and_decryption(&block);
+        assert_eq!(cmxs.len(), leaves.len());
+        assert_eq!(cmxs.len(), 3);
+
+        assert_eq!(cmxs[0], [0x01; 32]);
+        assert_eq!(leaves[0].nf, [0xA1; 32]);
+
+        assert_eq!(cmxs[1], [0x02; 32]);
+        assert_eq!(leaves[1].nf, [0xA2; 32]);
+
+        assert_eq!(cmxs[2], [0x03; 32]);
+        assert_eq!(leaves[2].nf, [0xA3; 32]);
+    }
+
+    #[test]
+    fn combined_matches_separate_extractors() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![
+                CompactTx {
+                    actions: vec![make_action(0x10, 0x20)],
+                    ..Default::default()
+                },
+                CompactTx {
+                    outputs: vec![make_sapling_output(0xFF)],
+                    actions: vec![make_action(0x30, 0x40), make_action(0x50, 0x60)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let cmxs_separate = extract_commitments(&block);
+        let leaves_separate = extract_decryption_leaves(&block);
+        let (cmxs_combined, leaves_combined) = extract_commitments_and_decryption(&block);
+
+        assert_eq!(cmxs_separate, cmxs_combined);
+        assert_eq!(leaves_separate, leaves_combined);
+    }
+
+    #[test]
+    fn decryption_leaf_pads_short_fields() {
+        let block = CompactBlock {
+            height: 100,
+            vtx: vec![CompactTx {
+                actions: vec![CompactOrchardAction {
+                    nullifier: vec![0xAA; 16],
+                    cmx: vec![0xBB; 32],
+                    ephemeral_key: vec![0xCC; 10],
+                    ciphertext: vec![0xDD; 20],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let leaves = extract_decryption_leaves(&block);
+        assert_eq!(leaves.len(), 1);
+        let leaf = &leaves[0];
+        assert_eq!(&leaf.nf[..16], &[0xAA; 16]);
+        assert_eq!(&leaf.nf[16..], &[0; 16]);
+        assert_eq!(&leaf.ephemeral_key[..10], &[0xCC; 10]);
+        assert_eq!(&leaf.ephemeral_key[10..], &[0; 22]);
+        assert_eq!(&leaf.ciphertext[..20], &[0xDD; 20]);
+        assert_eq!(&leaf.ciphertext[20..], &[0; 32]);
     }
 }

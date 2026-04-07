@@ -7,7 +7,7 @@ todos:
     status: done
   - id: phase-1b
     content: "Extend commitment-ingest parser: extract_decryption_leaves + combined extractor, tests"
-    status: pending
+    status: done
   - id: phase-1c
     content: "Create decryption-db crate: flat store, append/rollback, PIR DB builder, snapshot, tests"
     status: pending
