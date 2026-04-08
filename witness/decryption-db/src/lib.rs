@@ -331,10 +331,10 @@ mod tests {
         db.append_leaves(100, [1u8; 32], &leaves);
         let pir = db.build_pir_db();
 
-        for i in 0..SUBSHARD_LEAVES {
+        for (i, leaf) in leaves.iter().enumerate() {
             let offset = i * DECRYPT_LEAF_BYTES;
             let stored = DecryptionLeaf::from_bytes(&pir[offset..]).unwrap();
-            assert_eq!(stored, leaves[i], "leaf {i} mismatch in PIR DB row");
+            assert_eq!(stored, *leaf, "leaf {i} mismatch in PIR DB row");
         }
     }
 
