@@ -5,6 +5,5 @@ edition = "2021"
 
 [dependencies]
 decryption-types = { path = "../decryption-types" }
-witness-types = { path = "../witness-types" }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 thiserror = "2"

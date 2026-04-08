@@ -23,7 +23,7 @@ use decryption_types::{DECRYPT_DB_ROWS, DECRYPT_ROW_BYTES};
 #[derive(Parser)]
 #[command(name = "spend-server", about = "Zcash PIR server")]
 struct Cli {
-    /// Directory for snapshots (creates nullifier/ and witness/ subdirectories)
+    /// Directory for snapshots (creates nullifier/, witness/, decryption/ subdirectories)
     #[arg(long, default_value = "./data")]
     data_dir: PathBuf,
 

@@ -62,10 +62,10 @@ impl DecryptionDb {
     /// `leaf_offset` must be shard-aligned (`leaf_offset % SHARD_LEAVES == 0`)
     /// to keep sub-shard boundaries aligned with the witness PIR database.
     pub fn with_offset(leaf_offset: u64) -> Self {
-        debug_assert_eq!(
+        assert_eq!(
             leaf_offset as usize % SHARD_LEAVES,
             0,
-            "leaf_offset must be shard-aligned"
+            "leaf_offset must be shard-aligned (got {leaf_offset})"
         );
         Self {
             leaves: Vec::new(),

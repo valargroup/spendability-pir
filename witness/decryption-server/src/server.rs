@@ -50,6 +50,7 @@ pub fn rebuild_pir<P: PirEngine>(
         tree_size: db.tree_size(),
         window_start_shard: db.window_start_shard(),
         window_shard_count: db.window_shard_count(),
+        populated_shards: db.populated_shards(),
         phase: ServerPhase::Serving,
     };
 

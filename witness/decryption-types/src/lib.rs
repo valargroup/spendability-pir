@@ -78,7 +78,8 @@ impl DecryptionLeaf {
         buf
     }
 
-    /// Deserialize from a byte slice. Returns `None` if the slice is too short.
+    /// Deserialize from a byte slice. Returns `None` if the slice is shorter
+    /// than [`DECRYPT_LEAF_BYTES`]. Trailing bytes beyond that are ignored.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < DECRYPT_LEAF_BYTES {
             return None;

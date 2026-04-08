@@ -10,6 +10,7 @@ pub struct DecryptionMetadata {
     pub tree_size: u64,
     pub window_start_shard: u32,
     pub window_shard_count: u32,
+    pub populated_shards: u32,
     pub phase: ServerPhase,
 }
 

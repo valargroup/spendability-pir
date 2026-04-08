@@ -12,6 +12,7 @@ pub struct HealthResponse {
     pub phase: ServerPhase,
     pub anchor_height: Option<u64>,
     pub tree_size: u64,
+    pub populated_shards: u32,
 }
 
 pub async fn health<P: PirEngine + 'static>(
@@ -19,14 +20,19 @@ pub async fn health<P: PirEngine + 'static>(
 ) -> Json<HealthResponse> {
     let phase = (**state.phase.load()).clone();
     let pir = state.live_pir.load();
-    let (anchor_height, tree_size) = match pir.as_ref() {
-        Some(ps) => (Some(ps.metadata.anchor_height), ps.metadata.tree_size),
-        None => (None, 0),
+    let (anchor_height, tree_size, populated_shards) = match pir.as_ref() {
+        Some(ps) => (
+            Some(ps.metadata.anchor_height),
+            ps.metadata.tree_size,
+            ps.metadata.populated_shards,
+        ),
+        None => (None, 0, 0),
     };
     Json(HealthResponse {
         phase,
         anchor_height,
         tree_size,
+        populated_shards,
     })
 }
 

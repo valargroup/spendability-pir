@@ -424,6 +424,9 @@ dependencies = [
  "clap",
  "commitment-ingest",
  "commitment-tree-db",
+ "decryption-db",
+ "decryption-server",
+ "decryption-types",
  "hashtable-pir",
  "nf-ingest",
  "pir-types",
@@ -537,7 +540,6 @@ version = "0.1.0"
 dependencies = [
  "decryption-types",
  "thiserror",
- "witness-types",
  "xxhash-rust",
 ]
 
@@ -552,7 +554,6 @@ dependencies = [
  "pir-types",
  "reqwest",
  "serde",
- "serde_json",
  "spiral-rs",
  "thiserror",
  "tokio",

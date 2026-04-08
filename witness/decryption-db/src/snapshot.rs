@@ -100,6 +100,14 @@ impl DecryptionDb {
 
         let leaf_offset = read_u64(payload, &mut pos)?;
 
+        if tree_size < leaf_offset as usize {
+            return Err(DbError::SnapshotCorrupted {
+                reason: format!(
+                    "tree_size ({tree_size}) < leaf_offset ({leaf_offset})"
+                ),
+            });
+        }
+
         let (blocks, total_leaves) = read_block_records(payload, &mut pos, block_count)?;
         let local_leaves = tree_size - leaf_offset as usize;
         if total_leaves != local_leaves {
@@ -269,5 +277,32 @@ mod tests {
         assert_eq!(restored.leaves().len(), 2);
         assert_eq!(restored.latest_height(), Some(200));
         assert_eq!(restored.window_start_shard(), 3);
+    }
+
+    #[test]
+    fn snapshot_rejects_tree_size_less_than_offset() {
+        // Build a snapshot where tree_size < leaf_offset but with a valid
+        // checksum so the structural validation (not the checksum) catches it.
+        let offset = 3 * decryption_types::SHARD_LEAVES as u64;
+        let bad_tree_size = 1u64; // less than offset
+        let block_count = 0u64;
+        let latest_height = 0u64;
+        let latest_hash = [0u8; 32];
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&SNAPSHOT_MAGIC_V1.to_le_bytes());
+        payload.extend_from_slice(&bad_tree_size.to_le_bytes());
+        payload.extend_from_slice(&block_count.to_le_bytes());
+        payload.extend_from_slice(&latest_height.to_le_bytes());
+        payload.extend_from_slice(&latest_hash);
+        payload.extend_from_slice(&offset.to_le_bytes());
+
+        let checksum = xxh64(&payload, 0);
+        payload.extend_from_slice(&checksum.to_le_bytes());
+
+        let result = DecryptionDb::from_snapshot(&payload);
+        assert!(result.is_err());
+        let msg = format!("{}", result.err().unwrap());
+        assert!(msg.contains("tree_size"), "error should mention tree_size: {msg}");
     }
 }

@@ -238,21 +238,27 @@ pub async fn run<
                 );
                 db
             }
-            Err(_) => {
+            Err(e) => {
                 let offset = tree.leaf_offset();
-                tracing::info!(leaf_offset = offset, "creating fresh decryption db");
+                tracing::info!(
+                    leaf_offset = offset,
+                    error = %e,
+                    "no decryption snapshot, creating fresh db"
+                );
                 DecryptionDb::with_offset(offset)
             }
         };
 
         let wit_latest = tree.latest_height().unwrap_or(0);
-        let dec_latest = dec_db.latest_height();
 
-        if dec_latest.is_none() || dec_latest.unwrap() < wit_latest {
-            let from = match dec_latest {
-                Some(h) => h + 1,
-                None => decryption_sync_start(&config.lwd_urls, dec_db.leaf_offset()).await?,
-            };
+        let catch_up_from = match dec_db.latest_height() {
+            Some(h) if h >= wit_latest => None,
+            Some(h) => Some(h + 1),
+            None => Some(
+                decryption_sync_start(&config.lwd_urls, dec_db.leaf_offset()).await?,
+            ),
+        };
+        if let Some(from) = catch_up_from {
             if from <= wit_latest {
                 tracing::info!(from, to = wit_latest, "catching up decryption db");
                 catch_up_decryption(&config.lwd_urls, from, wit_latest, &mut dec_db).await?;
@@ -328,7 +334,6 @@ pub async fn run<
 
     // --- Follow loop ---
 
-    // Determine the starting height from whichever subsystem(s) are enabled.
     // Determine the starting height/hash from whichever subsystem(s) are enabled.
     // When both are enabled, catch up the one that's behind first.
     #[cfg(all(feature = "nullifier", feature = "witness"))]
@@ -663,16 +668,29 @@ async fn catch_up_decryption(
             let hash = to_hash_array(&block.hash);
 
             if dec_db.tree_size() == 0 && leaf_offset > 0 {
+                // First block in a windowed sync: only keep actions past
+                // the offset. Requires chain_metadata to determine the split;
+                // if metadata is absent we cannot safely determine which
+                // actions belong in the window so we skip the block.
                 let end_tree_size = block
                     .chain_metadata
                     .as_ref()
-                    .map_or(0u64, |m| m.orchard_commitment_tree_size as u64);
-                if end_tree_size <= leaf_offset {
-                    continue;
+                    .map(|m| m.orchard_commitment_tree_size as u64);
+                match end_tree_size {
+                    Some(ets) if ets > leaf_offset => {
+                        let spillover_count = (ets - leaf_offset) as usize;
+                        let skip = all_leaves.len().saturating_sub(spillover_count);
+                        dec_db.append_leaves(height, hash, &all_leaves[skip..]);
+                    }
+                    Some(_) => continue,
+                    None => {
+                        tracing::warn!(
+                            height,
+                            "block missing orchard_commitment_tree_size, skipping"
+                        );
+                        continue;
+                    }
                 }
-                let spillover_count = (end_tree_size - leaf_offset) as usize;
-                let skip = all_leaves.len().saturating_sub(spillover_count);
-                dec_db.append_leaves(height, hash, &all_leaves[skip..]);
             } else {
                 dec_db.append_leaves(height, hash, &all_leaves);
             }
