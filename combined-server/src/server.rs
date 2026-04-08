@@ -254,9 +254,7 @@ pub async fn run<
         let catch_up_from = match dec_db.latest_height() {
             Some(h) if h >= wit_latest => None,
             Some(h) => Some(h + 1),
-            None => Some(
-                decryption_sync_start(&config.lwd_urls, dec_db.leaf_offset()).await?,
-            ),
+            None => Some(decryption_sync_start(&config.lwd_urls, dec_db.leaf_offset()).await?),
         };
         if let Some(from) = catch_up_from {
             if from <= wit_latest {
@@ -279,7 +277,11 @@ pub async fn run<
         )?;
         state.live_pir.store(Arc::new(Some(pir)));
         state.phase.store(Arc::new(ServerPhase::Serving));
-        tracing::info!(anchor_height, tree_size = dec_db.tree_size(), "decryption pir ready");
+        tracing::info!(
+            anchor_height,
+            tree_size = dec_db.tree_size(),
+            "decryption pir ready"
+        );
 
         (state, dec_db)
     };

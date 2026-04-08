@@ -214,11 +214,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 503);
 
-        let response = client
-            .get(format!("{base}/metadata"))
-            .send()
-            .await
-            .unwrap();
+        let response = client.get(format!("{base}/metadata")).send().await.unwrap();
         assert_eq!(response.status(), 503);
 
         server.abort();

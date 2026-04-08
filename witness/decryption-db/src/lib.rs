@@ -326,9 +326,8 @@ mod tests {
     #[test]
     fn pir_db_row_layout() {
         let mut db = DecryptionDb::new();
-        let leaves: Vec<DecryptionLeaf> = (0..SUBSHARD_LEAVES)
-            .map(|i| make_leaf(i as u8))
-            .collect();
+        let leaves: Vec<DecryptionLeaf> =
+            (0..SUBSHARD_LEAVES).map(|i| make_leaf(i as u8)).collect();
         db.append_leaves(100, [1u8; 32], &leaves);
         let pir = db.build_pir_db();
 

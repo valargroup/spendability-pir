@@ -71,9 +71,7 @@ pub async fn query<P: PirEngine + 'static>(
     }
 }
 
-pub async fn metadata<P: PirEngine + 'static>(
-    State(state): State<Arc<AppState<P>>>,
-) -> Response {
+pub async fn metadata<P: PirEngine + 'static>(State(state): State<Arc<AppState<P>>>) -> Response {
     let pir = state.live_pir.load();
     match pir.as_ref() {
         Some(ps) => Json(&ps.metadata).into_response(),

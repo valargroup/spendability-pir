@@ -25,7 +25,12 @@ impl DecryptionDb {
     pub fn to_snapshot(&self) -> Vec<u8> {
         let block_count = self.blocks.len();
         let local_leaves = self.leaves.len();
-        let estimated = 8 + 8 + 8 + 8 + 32 + 8
+        let estimated = 8
+            + 8
+            + 8
+            + 8
+            + 32
+            + 8
             + block_count * BLOCK_RECORD_SIZE
             + local_leaves * DECRYPT_LEAF_BYTES
             + 8;
@@ -65,13 +70,12 @@ impl DecryptionDb {
         }
 
         let payload = &data[..data.len() - 8];
-        let stored_checksum = u64::from_le_bytes(
-            data[data.len() - 8..]
-                .try_into()
-                .map_err(|_| DbError::SnapshotCorrupted {
+        let stored_checksum =
+            u64::from_le_bytes(data[data.len() - 8..].try_into().map_err(|_| {
+                DbError::SnapshotCorrupted {
                     reason: "checksum read failed".into(),
-                })?,
-        );
+                }
+            })?);
         if xxh64(payload, 0) != stored_checksum {
             return Err(DbError::SnapshotCorrupted {
                 reason: "checksum mismatch".into(),
@@ -102,9 +106,7 @@ impl DecryptionDb {
 
         if tree_size < leaf_offset as usize {
             return Err(DbError::SnapshotCorrupted {
-                reason: format!(
-                    "tree_size ({tree_size}) < leaf_offset ({leaf_offset})"
-                ),
+                reason: format!("tree_size ({tree_size}) < leaf_offset ({leaf_offset})"),
             });
         }
 
@@ -170,11 +172,7 @@ fn read_block_records(
     Ok((blocks, total))
 }
 
-fn read_leaves(
-    data: &[u8],
-    pos: &mut usize,
-    count: usize,
-) -> Result<Vec<DecryptionLeaf>, DbError> {
+fn read_leaves(data: &[u8], pos: &mut usize, count: usize) -> Result<Vec<DecryptionLeaf>, DbError> {
     let end = *pos + count * DECRYPT_LEAF_BYTES;
     if end > data.len() {
         return Err(DbError::SnapshotCorrupted {
@@ -303,6 +301,9 @@ mod tests {
         let result = DecryptionDb::from_snapshot(&payload);
         assert!(result.is_err());
         let msg = format!("{}", result.err().unwrap());
-        assert!(msg.contains("tree_size"), "error should mention tree_size: {msg}");
+        assert!(
+            msg.contains("tree_size"),
+            "error should mention tree_size: {msg}"
+        );
     }
 }
