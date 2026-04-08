@@ -16,7 +16,7 @@ todos:
     status: done
   - id: phase-2b
     content: "Integrate decryption into combined-server: feature flag, follow loop, routes, health, snapshots"
-    status: pending
+    status: done
   - id: phase-2c
     content: "CI updates: add test-decryption job, update workspace test coverage"
     status: pending

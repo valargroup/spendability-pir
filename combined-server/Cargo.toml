@@ -9,7 +9,7 @@ path = "src/main.rs"
 required-features = ["ypir"]
 
 [features]
-default = ["nullifier", "witness"]
+default = ["nullifier", "witness", "decryption"]
 nullifier = [
     "dep:spend-server",
     "dep:spend-types",
@@ -22,13 +22,22 @@ witness = [
     "dep:commitment-ingest",
     "dep:commitment-tree-db",
 ]
-ypir = ["spend-server?/ypir", "witness-server?/ypir"]
+decryption = [
+    "witness",
+    "dep:decryption-server",
+    "dep:decryption-types",
+    "dep:decryption-db",
+]
+ypir = ["spend-server?/ypir", "witness-server?/ypir", "decryption-server?/ypir"]
 
 [dependencies]
 spend-server = { path = "../nullifier/spend-server", optional = true }
 witness-server = { path = "../witness/witness-server", optional = true }
+decryption-server = { path = "../witness/decryption-server", optional = true }
 spend-types = { path = "../nullifier/spend-types", optional = true }
 witness-types = { path = "../witness/witness-types", optional = true }
+decryption-types = { path = "../witness/decryption-types", optional = true }
+decryption-db = { path = "../witness/decryption-db", optional = true }
 pir-types = { path = "../shared/pir-types" }
 nf-ingest = { path = "../nullifier/nf-ingest", optional = true }
 commitment-ingest = { path = "../witness/commitment-ingest", optional = true }

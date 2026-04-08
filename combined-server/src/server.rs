@@ -21,6 +21,11 @@ use commitment_tree_db::CommitmentTreeDb;
 #[cfg(feature = "witness")]
 use witness_types::{L0_DB_ROWS, SUBSHARD_ROW_BYTES};
 
+#[cfg(feature = "decryption")]
+use decryption_db::DecryptionDb;
+#[cfg(feature = "decryption")]
+use decryption_types::{DECRYPT_DB_ROWS, DECRYPT_ROW_BYTES};
+
 const FOLLOW_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
@@ -41,6 +46,9 @@ pub enum ServerError {
     #[cfg(feature = "witness")]
     #[error("witness server error: {0}")]
     Witness(#[from] witness_server::server::ServerError),
+    #[cfg(feature = "decryption")]
+    #[error("decryption server error: {0}")]
+    Decryption(#[from] decryption_server::server::ServerError),
     #[error("chain client error: {0}")]
     Client(#[from] chain_ingest::ClientError),
     #[cfg(feature = "nullifier")]
@@ -57,6 +65,8 @@ struct CombinedHealthState {
     nf_phase: Arc<arc_swap::ArcSwap<ServerPhase>>,
     #[cfg(feature = "witness")]
     wit_phase: Arc<arc_swap::ArcSwap<ServerPhase>>,
+    #[cfg(feature = "decryption")]
+    dec_phase: Arc<arc_swap::ArcSwap<ServerPhase>>,
 }
 
 #[derive(Serialize)]
@@ -65,6 +75,8 @@ struct CombinedHealthResponse {
     nullifier: SubsystemHealth,
     #[cfg(feature = "witness")]
     witness: SubsystemHealth,
+    #[cfg(feature = "decryption")]
+    decryption: SubsystemHealth,
 }
 
 #[derive(Serialize)]
@@ -116,11 +128,22 @@ async fn combined_health(State(state): State<Arc<CombinedHealthState>>) -> impl 
         phase_to_health(&wit_phase)
     };
 
+    #[cfg(feature = "decryption")]
+    let dec_health = {
+        let dec_phase = state.dec_phase.load();
+        if !matches!(dec_phase.as_ref(), ServerPhase::Serving) {
+            all_serving = false;
+        }
+        phase_to_health(&dec_phase)
+    };
+
     let body = CombinedHealthResponse {
         #[cfg(feature = "nullifier")]
         nullifier: nf_health,
         #[cfg(feature = "witness")]
         witness: wit_health,
+        #[cfg(feature = "decryption")]
+        decryption: dec_health,
     };
 
     let status = if all_serving {
@@ -136,10 +159,12 @@ async fn combined_health(State(state): State<Arc<CombinedHealthState>>) -> impl 
 pub async fn run<
     #[cfg(feature = "nullifier")] NfP: PirEngine + 'static,
     #[cfg(feature = "witness")] WitP: PirEngine + 'static,
+    #[cfg(feature = "decryption")] DecP: PirEngine + 'static,
 >(
     config: CombinedConfig,
     #[cfg(feature = "nullifier")] nf_engine: Arc<NfP>,
     #[cfg(feature = "witness")] wit_engine: Arc<WitP>,
+    #[cfg(feature = "decryption")] dec_engine: Arc<DecP>,
 ) -> Result<()> {
     // --- Sync phase ---
 
@@ -196,6 +221,63 @@ pub async fn run<
             .map_err(ServerError::Witness)?
     };
 
+    // --- Decryption sync (runs after witness, shares its window) ---
+
+    #[cfg(feature = "decryption")]
+    let (dec_state, mut dec_db) = {
+        let dec_data_dir = config.data_dir.join("decryption");
+        std::fs::create_dir_all(&dec_data_dir)?;
+
+        let mut dec_db = match decryption_server::snapshot_io::load_snapshot(&dec_data_dir).await {
+            Ok(db) => {
+                tracing::info!(
+                    latest_height = ?db.latest_height(),
+                    tree_size = db.tree_size(),
+                    leaf_offset = db.leaf_offset(),
+                    "loaded decryption snapshot"
+                );
+                db
+            }
+            Err(_) => {
+                let offset = tree.leaf_offset();
+                tracing::info!(leaf_offset = offset, "creating fresh decryption db");
+                DecryptionDb::with_offset(offset)
+            }
+        };
+
+        let wit_latest = tree.latest_height().unwrap_or(0);
+        let dec_latest = dec_db.latest_height();
+
+        if dec_latest.is_none() || dec_latest.unwrap() < wit_latest {
+            let from = match dec_latest {
+                Some(h) => h + 1,
+                None => decryption_sync_start(&config.lwd_urls, dec_db.leaf_offset()).await?,
+            };
+            if from <= wit_latest {
+                tracing::info!(from, to = wit_latest, "catching up decryption db");
+                catch_up_decryption(&config.lwd_urls, from, wit_latest, &mut dec_db).await?;
+            }
+        }
+
+        decryption_server::snapshot_io::save_snapshot(&dec_db, &dec_data_dir)
+            .await
+            .map_err(decryption_server::server::ServerError::from)?;
+
+        let state = Arc::new(decryption_server::state::AppState::new(dec_engine.clone()));
+        let anchor_height = dec_db.latest_height().unwrap_or(0);
+        let pir = decryption_server::server::rebuild_pir(
+            &*dec_engine,
+            &dec_db,
+            &state.scenario,
+            anchor_height,
+        )?;
+        state.live_pir.store(Arc::new(Some(pir)));
+        state.phase.store(Arc::new(ServerPhase::Serving));
+        tracing::info!(anchor_height, tree_size = dec_db.tree_size(), "decryption pir ready");
+
+        (state, dec_db)
+    };
+
     tracing::info!("sync complete, building router");
 
     // --- Build router ---
@@ -205,6 +287,8 @@ pub async fn run<
         nf_phase: Arc::new(arc_swap::ArcSwap::from_pointee(ServerPhase::Serving)),
         #[cfg(feature = "witness")]
         wit_phase: Arc::new(arc_swap::ArcSwap::from_pointee(ServerPhase::Serving)),
+        #[cfg(feature = "decryption")]
+        dec_phase: Arc::new(arc_swap::ArcSwap::from_pointee(ServerPhase::Serving)),
     });
 
     #[allow(unused_mut)]
@@ -225,6 +309,14 @@ pub async fn run<
         router = router.nest(
             "/witness",
             witness_server::server::build_router(wit_state.clone()),
+        );
+    }
+
+    #[cfg(feature = "decryption")]
+    {
+        router = router.nest(
+            "/decrypt",
+            decryption_server::server::build_router(dec_state.clone()),
         );
     }
 
@@ -297,6 +389,12 @@ pub async fn run<
         item_size_bits: (SUBSHARD_ROW_BYTES * 8) as u64,
     };
 
+    #[cfg(feature = "decryption")]
+    let dec_scenario = pir_types::YpirScenario {
+        num_items: DECRYPT_DB_ROWS as u64,
+        item_size_bits: (DECRYPT_ROW_BYTES * 8) as u64,
+    };
+
     let mut client = LwdClient::connect(&config.lwd_urls).await?;
     let mut tracker =
         ChainTracker::with_tip(follow_height, follow_hash, CONFIRMATION_DEPTH as usize * 2);
@@ -325,8 +423,11 @@ pub async fn run<
             #[cfg(feature = "nullifier")]
             let (nullifiers, nf_this_tree_size) =
                 nf_ingest::extract_nullifiers_with_meta(block, nf_prev_tree_size);
-            #[cfg(feature = "witness")]
+            #[cfg(all(feature = "witness", not(feature = "decryption")))]
             let commitments = commitment_ingest::extract_commitments(block);
+            #[cfg(feature = "decryption")]
+            let (commitments, dec_leaves) =
+                commitment_ingest::extract_commitments_and_decryption(block);
 
             match tracker.push_block(height, hash, prev_hash) {
                 ChainAction::Extend => {
@@ -342,6 +443,11 @@ pub async fn run<
                     #[cfg(feature = "witness")]
                     {
                         tree.append_commitments(height, hash, &commitments);
+                    }
+
+                    #[cfg(feature = "decryption")]
+                    {
+                        dec_db.append_leaves(height, hash, &dec_leaves);
                     }
 
                     current_height = height;
@@ -390,6 +496,12 @@ pub async fn run<
                         tree.append_commitments(height, hash, &commitments);
                     }
 
+                    #[cfg(feature = "decryption")]
+                    {
+                        dec_db.rollback_to(rollback_to);
+                        dec_db.append_leaves(height, hash, &dec_leaves);
+                    }
+
                     current_height = height;
                     blocks_since_snapshot += 1;
                     #[cfg(feature = "witness")]
@@ -426,6 +538,18 @@ pub async fn run<
             wit_state.live_pir.store(Arc::new(Some(wit_pir)));
         }
 
+        #[cfg(feature = "decryption")]
+        {
+            let anchor_height = dec_db.latest_height().unwrap_or(0);
+            let dec_pir = decryption_server::server::rebuild_pir(
+                &*dec_engine,
+                &dec_db,
+                &dec_scenario,
+                anchor_height,
+            )?;
+            dec_state.live_pir.store(Arc::new(Some(dec_pir)));
+        }
+
         // Periodic snapshots
         if blocks_since_snapshot >= config.snapshot_interval {
             #[cfg(feature = "nullifier")]
@@ -443,6 +567,13 @@ pub async fn run<
                     .await
                     .map_err(witness_server::server::ServerError::from)
                     .map_err(ServerError::Witness)?;
+            }
+            #[cfg(feature = "decryption")]
+            {
+                let dec_data_dir = config.data_dir.join("decryption");
+                decryption_server::snapshot_io::save_snapshot(&dec_db, &dec_data_dir)
+                    .await
+                    .map_err(decryption_server::server::ServerError::from)?;
             }
             blocks_since_snapshot = 0;
             tracing::info!("periodic snapshots saved");
@@ -479,6 +610,85 @@ async fn catch_up_witness(
     witness_server::server::sync_range(lwd_urls, from, to, tree, initial_tree_size, &phase)
         .await
         .map_err(ServerError::Witness)?;
+    Ok(())
+}
+
+/// Determine the block height to start syncing decryption data from.
+///
+/// For a windowed DB (leaf_offset > 0), finds the completing block height via
+/// GetSubtreeRoots — the same block the witness server starts from. For a
+/// full-range DB, starts from NU5.
+#[cfg(feature = "decryption")]
+async fn decryption_sync_start(lwd_urls: &[String], leaf_offset: u64) -> Result<u64> {
+    use witness_types::SHARD_LEAVES;
+
+    if leaf_offset == 0 {
+        return Ok(pir_types::NU5_MAINNET_ACTIVATION);
+    }
+
+    let mut client = LwdClient::connect(lwd_urls).await?;
+    let subtree_roots = client.get_subtree_roots(1, 0, 65535).await?;
+    let window_start_shard = (leaf_offset / SHARD_LEAVES as u64) as usize;
+
+    if window_start_shard > 0 && window_start_shard <= subtree_roots.len() {
+        Ok(subtree_roots[window_start_shard - 1].completing_block_height)
+    } else {
+        Ok(pir_types::NU5_MAINNET_ACTIVATION)
+    }
+}
+
+/// Fetch blocks in batches and append decryption leaves to the DB.
+///
+/// Handles the windowed case: if the DB is empty and has a non-zero offset,
+/// the first block's actions are split — only leaves past the offset are kept.
+#[cfg(feature = "decryption")]
+async fn catch_up_decryption(
+    lwd_urls: &[String],
+    from: u64,
+    to: u64,
+    dec_db: &mut DecryptionDb,
+) -> Result<()> {
+    const BATCH_SIZE: u64 = 10_000;
+    let mut client = LwdClient::connect(lwd_urls).await?;
+    let mut current = from;
+    let leaf_offset = dec_db.leaf_offset();
+
+    while current <= to {
+        let batch_end = (current + BATCH_SIZE - 1).min(to);
+        let blocks = client.get_block_range(current, batch_end).await?;
+
+        for block in &blocks {
+            let all_leaves = commitment_ingest::extract_decryption_leaves(block);
+            let height = block.height;
+            let hash = to_hash_array(&block.hash);
+
+            if dec_db.tree_size() == 0 && leaf_offset > 0 {
+                let end_tree_size = block
+                    .chain_metadata
+                    .as_ref()
+                    .map_or(0u64, |m| m.orchard_commitment_tree_size as u64);
+                if end_tree_size <= leaf_offset {
+                    continue;
+                }
+                let spillover_count = (end_tree_size - leaf_offset) as usize;
+                let skip = all_leaves.len().saturating_sub(spillover_count);
+                dec_db.append_leaves(height, hash, &all_leaves[skip..]);
+            } else {
+                dec_db.append_leaves(height, hash, &all_leaves);
+            }
+        }
+
+        if current % 10_000 == from % 10_000 || batch_end >= to {
+            tracing::info!(
+                height = batch_end,
+                tree_size = dec_db.tree_size(),
+                "decryption sync progress"
+            );
+        }
+
+        current = batch_end + 1;
+    }
+
     Ok(())
 }
 
