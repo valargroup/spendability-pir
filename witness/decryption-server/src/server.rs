@@ -102,7 +102,9 @@ mod tests {
         let pir_state = rebuild_pir(&engine, &db, &scenario, 100).unwrap();
         assert_eq!(pir_state.metadata.anchor_height, 100);
         assert_eq!(pir_state.metadata.tree_size, 1);
+        assert_eq!(pir_state.metadata.populated_shards, 1);
         assert_eq!(pir_state.metadata.window_shard_count, 1);
+        assert_eq!(pir_state.metadata.window_start_shard, 0);
     }
 
     #[tokio::test]
@@ -129,6 +131,36 @@ mod tests {
         let client = reqwest::Client::new();
         let base = format!("http://{addr}");
 
+        // /health — verify all metadata fields
+        let health: serde_json::Value = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["phase"], "Serving");
+        assert_eq!(health["anchor_height"], 100);
+        assert_eq!(health["tree_size"], 1);
+        assert_eq!(health["populated_shards"], 1);
+
+        // /metadata — verify window geometry
+        let meta: crate::state::DecryptionMetadata = client
+            .get(format!("{base}/metadata"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(meta.anchor_height, 100);
+        assert_eq!(meta.tree_size, 1);
+        assert_eq!(meta.populated_shards, 1);
+        assert_eq!(meta.window_start_shard, 0);
+        assert_eq!(meta.window_shard_count, 1);
+
+        // /params
         let params: pir_types::YpirScenario = client
             .get(format!("{base}/params"))
             .send()
@@ -139,6 +171,7 @@ mod tests {
             .unwrap();
         assert_eq!(params.num_items, decryption_types::DECRYPT_DB_ROWS as u64);
 
+        // /query — verify leaf round-trip
         let row_idx: u32 = 0;
         let response = client
             .post(format!("{base}/query"))
@@ -153,6 +186,40 @@ mod tests {
         let stored =
             DecryptionLeaf::from_bytes(&body[..decryption_types::DECRYPT_LEAF_BYTES]).unwrap();
         assert_eq!(stored, leaf);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn query_returns_503_before_pir_ready() {
+        let engine = Arc::new(StubPirEngine);
+        let state = Arc::new(AppState::new(engine.clone()));
+
+        let router = build_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        let response = client
+            .post(format!("{base}/query"))
+            .body(0u32.to_le_bytes().to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 503);
+
+        let response = client
+            .get(format!("{base}/metadata"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 503);
 
         server.abort();
     }
