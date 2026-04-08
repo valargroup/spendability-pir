@@ -10,16 +10,16 @@ todos:
     status: done
   - id: phase-1c
     content: "Create decryption-db crate: flat store, append/rollback, PIR DB builder, snapshot, tests"
-    status: pending
+    status: done
   - id: phase-2a
     content: "Create decryption-server crate: Axum routes, PirEngine, rebuild_pir, PIR round-trip test"
-    status: pending
+    status: done
   - id: phase-2b
     content: "Integrate decryption into combined-server: feature flag, follow loop, routes, health, snapshots"
-    status: pending
+    status: done
   - id: phase-2c
     content: "CI updates: add test-decryption job, update workspace test coverage"
-    status: pending
+    status: done
   - id: phase-3a
     content: "Create decryption-client crate: YPIR client, connect/query/decode, blocking wrapper"
     status: pending

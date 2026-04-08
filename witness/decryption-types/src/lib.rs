@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use witness_types::{
     decompose_position, physical_row_index, Hash, L0_DB_ROWS, L0_MAX_SHARDS, SHARD_HEIGHT,
-    SHARD_LEAVES, SUBSHARD_HEIGHT, SUBSHARD_LEAVES, SUBSHARDS_PER_SHARD,
+    SHARD_LEAVES, SUBSHARDS_PER_SHARD, SUBSHARD_HEIGHT, SUBSHARD_LEAVES,
 };
 
 /// Bytes per decryption leaf: nf (32) + ephemeral_key (32) + ciphertext (52).
@@ -78,7 +78,8 @@ impl DecryptionLeaf {
         buf
     }
 
-    /// Deserialize from a byte slice. Returns `None` if the slice is too short.
+    /// Deserialize from a byte slice. Returns `None` if the slice is shorter
+    /// than [`DECRYPT_LEAF_BYTES`]. Trailing bytes beyond that are ignored.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < DECRYPT_LEAF_BYTES {
             return None;

@@ -19,6 +19,7 @@ jobs:
       shared: ${{ steps.filter.outputs.shared }}
       nullifier: ${{ steps.filter.outputs.nullifier }}
       witness: ${{ steps.filter.outputs.witness }}
+      decryption: ${{ steps.filter.outputs.decryption }}
       code: ${{ steps.filter.outputs.code }}
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +37,10 @@ jobs:
               - 'nullifier/**'
             witness:
               - 'witness/**'
+            decryption:
+              - 'witness/decryption-types/**'
+              - 'witness/decryption-db/**'
+              - 'witness/decryption-server/**'
             code:
               - '**/*.rs'
               - '**/*.toml'
@@ -119,6 +124,31 @@ jobs:
           -p commitment-tree-db
           -p witness-server
           -p witness-client
+          --lib
+
+  test-decryption:
+    name: Test (decryption)
+    needs: changes
+    if: needs.changes.outputs.shared == 'true' || needs.changes.outputs.witness == 'true' || needs.changes.outputs.decryption == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-03-15
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: decryption
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Unit tests (decryption crates)
+        run: >-
+          cargo test
+          -p decryption-types
+          -p decryption-db
+          -p decryption-server
           --lib
 
   test-tree-correctness:
@@ -205,7 +235,7 @@ jobs:
   notify-slack:
     name: Slack Notification
     if: ${{ always() && github.ref == 'refs/heads/main' && github.event_name == 'push' && contains(join(needs.*.result, ','), 'failure') }}
-    needs: [lint, test-nullifier, test-witness, test-tree-correctness, test-pir-round-trip, test-ypir]
+    needs: [lint, test-nullifier, test-witness, test-decryption, test-tree-correctness, test-pir-round-trip, test-ypir]
     runs-on: ubuntu-latest
     steps:
       - name: Notify Slack on failure
@@ -232,7 +262,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nLint: `${{ needs.lint.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | PIR: `${{ needs.test-pir-round-trip.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
+                  "text": { "type": "mrkdwn", "text": "*Job Results:*\nLint: `${{ needs.lint.result }}` | Nullifier: `${{ needs.test-nullifier.result }}` | Witness: `${{ needs.test-witness.result }}` | Decryption: `${{ needs.test-decryption.result }}` | Tree: `${{ needs.test-tree-correctness.result }}` | PIR: `${{ needs.test-pir-round-trip.result }}` | YPIR: `${{ needs.test-ypir.result }}`" }
                 }
               ]
             }

@@ -74,7 +74,7 @@ The system spans four repositories and three runtime environments:
 |---|---|---|---|
 | `spendability-pir` | PIR servers + client libraries | `nullifier/spend-client/`, `nullifier/spend-types/` | `witness/witness-client/`, `witness/witness-types/` |
 | `zcash-swift-wallet-sdk` | Rust FFI + Swift SDK | `rust/src/spendability.rs`, `rust/src/change_discovery.rs`, `SpendabilityBackend.swift`, `SpendabilityTypes.swift` | `rust/src/witness.rs`, `WitnessBackend.swift`, `WitnessTypes.swift` |
-| `zcash_client_sqlite` | Wallet database crate | `src/wallet/pir.rs` (spent-note recording), `src/wallet/common.rs` (`spent_notes_clause`, `unscanned_tip_exists` bypass), `src/wallet.rs` (`is_any_spendable` bypass, `truncate_to_height`), `src/wallet/pir_provisional.rs` (change note storage) | `src/wallet/pir_witness.rs`, `src/wallet/common.rs` (`shard_scanned_condition` bypass) |
+| `zcash_client_sqlite` | Wallet database crate | `src/wallet/pir.rs` (all PIR note lifecycle: spend tracking, witness storage, provisional notes), `src/wallet/common.rs` (`spent_notes_clause`, `unscanned_tip_exists` bypass), `src/wallet.rs` (`is_any_spendable` bypass, `truncate_to_height`) | `src/wallet/pir.rs` (witness storage + Merkle path construction), `src/wallet/common.rs` (`shard_scanned_condition` bypass) |
 | `zcash_client_backend` | Wallet logic crate | — | `src/data_api.rs` (`get_pir_orchard_merkle_path` trait method), `src/data_api/wallet.rs` (`pir_orchard_witness_fallback`) |
 | `zodl-ios` | iOS app (TCA) | `RootInitialization.swift` (`.checkSpendabilityPIR`), `RootTransactions.swift` (placeholders), `PIRDebugStore.swift` | `RootInitialization.swift` (`.checkWitnessPIR`), `PIRDebugStore.swift` (witness section) |
 
@@ -413,7 +413,7 @@ Two Cargo features in `zcash_client_sqlite` control PIR integration:
 | `spent_notes_clause` | Original query (no UNION) | UNION with `pir_notes` spent rows |
 | `is_any_spendable` (Orchard) | Checked normally | Bypassed (always true) |
 | `unscanned_tip_exists` (Orchard) | Checked normally | Bypassed (skipped) |
-| `pir_provisional` module | Not compiled | Compiled |
+| `pir` module (provisional note lifecycle) | Not compiled | Compiled |
 | `get_wallet_summary` (Orchard) | No provisional note contribution | Active leaf provisional notes (not spent, not scanner-reconciled) added to spendable/pending balance |
 | Scanner reconciliation | No provisional cleanup | Sets `canonical_note_id` and `discovered_by_scanner = 1`; `is_spent` propagates via same row |
 | `truncate_to_height` | DELETE is a no-op (empty table) | Clears all `pir_notes` rows |
@@ -422,7 +422,7 @@ Two Cargo features in `zcash_client_sqlite` control PIR integration:
 
 | Aspect | Feature OFF | Feature ON |
 |---|---|---|
-| `pir_witness` module | Not compiled | Compiled |
+| `pir` module (witness storage) | Not compiled | Compiled |
 | `shard_scanned_condition` (Orchard) | Original check | Accepts notes with `witness_siblings IS NOT NULL` |
 | Transaction builder | ShardTree only | Falls back to PIR witnesses from `pir_notes` |
 | `truncate_to_height` | (covered by `spendability-pir` above) | Witness data cleared with all `pir_notes` rows |
