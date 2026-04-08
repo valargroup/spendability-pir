@@ -19,7 +19,7 @@ todos:
     status: done
   - id: phase-2c
     content: "CI updates: add test-decryption job, update workspace test coverage"
-    status: pending
+    status: done
   - id: phase-3a
     content: "Create decryption-client crate: YPIR client, connect/query/decode, blocking wrapper"
     status: pending
