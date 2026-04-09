@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use witness_types::{
     decompose_position, physical_row_index, Hash, L0_DB_ROWS, L0_MAX_SHARDS, SHARD_HEIGHT,
-    SHARD_LEAVES, SUBSHARD_HEIGHT, SUBSHARD_LEAVES, SUBSHARDS_PER_SHARD,
+    SHARD_LEAVES, SUBSHARDS_PER_SHARD, SUBSHARD_HEIGHT, SUBSHARD_LEAVES,
 };
 
 /// Bytes per decryption leaf: nf (32) + ephemeral_key (32) + ciphertext (52).
