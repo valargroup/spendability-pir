@@ -55,4 +55,89 @@ This leads to the following problem:
 
 Please meake detected spend entries be note-aware so that we can cleanly update statuses
 
+## Wallet Flow
+
+1. Canonical
+
+These are the notes identified during sync.
+
+2. Provisional
+
+These are the intermediary notes identified as part of recursive PIR flow
+
+### Canonical Note Scanning Identification
+
+1. Scanning flow identifies the notes
+2. Scanning flow trial decrypts and persists the notes belonging to them
+
+Spendability PIR wallet update needed:
+
+1. During scanning, trigger PIR processing for it.
+2. When starting up after restart, trigger PIR processing for all notes in the wallet.
+
+### Recursive PIR Flow
+
+#### Find Unspent Notes
+
+1. Check nullifier PIR.
+   * If the note is unspent, we stop here, the note is in balance, add it to unspent notes.
+   * If the note is spent, go to 2.
+2. Find the transaction that spent the note
+   * Query the rpc for the block where the spend happenned (to be replaced by PIR in the future)
+   * Identify the specific actions for spend and for change.
+      * Spend is outgoing so it is not included in the balance
+      * For change note, proceed to 1.
+
+#### Create Witnesses
+
+Once we "Find Unspent Notes", begin the witness creation for them.
+
+### Design Goals
+
+* The PIR system is an optional sidecar that improves UX. If PIR server is donw, the system fallbacks to the standard scanning flow
+* As an outcome of the above, try to decouple databases tables
+
+### Edge Cases
+
+* During scanning, we update the canonical balance and then there are duplicate transactions that break activity.
+  * TODO: should we make scanning flow be the canonical for display as it catches up through heights. OR should we check if we are in PIR mode at sync start and, if so, make PIR be the canonical for the view until the full catch up
+
+### Design Claims
+
+This section documents statements as factual.
+
+#### Recursive Handling of 2 Notes Going Into Same Spend 
+
+Problem: Scanning detects a change note, triggers PIR spendability for it. But it was already scanned by the recursive spendabiliy chain triggerred by the note before it.
+   * Before we keep doing redundant recursion, confirm if it was already processed and stop early
+
+Imagine
+- Canonical note A
+- Canonical note B
+- Provisional note C
+- Provisional note D
+
+2-in-2-out where both A and B are spent in the same transaction. C and D are outputs.
+
+Then, if we were to start from A, recursion would go through the spend and continue recursing.
+
+But note B would stop at the same spend because the downstream recursion is alrady marked completed by A. 
+
+Any further recursion on C and D from B's path is deduplicated by the pir_checked = 0. The activity view groups by spending_tx_hash, so A and B collapse into one entry with gross_value = A.value + B.value and change_value = C.value + D.value.
+
+
+
+# TODOS Pre-merge
+
+zcash-swift-wallet-sdk
+- Delete the DEBUG only APIs
+- Comment on SQL connection addition as drive by in PR
+- Remove debug reset APIs
+
+
+# Design Decisions
+
+- Avoid Keystone Hardware wallet support. Avoid breaking PCZT APIs.
+
+
 
